@@ -1,4 +1,4 @@
-# ComfyUI Anima Regional Prompt 0.4.0 (routing redesign)
+# ComfyUI Anima Regional Prompt 0.4.1 (routing redesign)
 
 Training-free character-level regional prompting for Anima. The plugin keeps
 character prompts in separate attention branches and routes each branch with an
@@ -17,6 +17,15 @@ Restart ComfyUI after installation or update.
 
 An importable Mixer + Regional workflow is included in `examples/`. Its model
 filenames are examples and may need to be changed for your installation.
+
+## 0.4.1 hotfix
+
+`multi_character_guard=soft` and `strong` now keep the overlap mask in the
+normal `[batch, token, 1]` shape. Version 0.4.0 accidentally retained an extra
+leading dimension when the guard was active, which changed cross-attention
+output from three dimensions to four and caused Anima's final `einops`
+rearrange to fail. The Mixer warning was only the outer wrapper reporting this
+Regional runtime error.
 
 ## 0.4.0 routing contract
 

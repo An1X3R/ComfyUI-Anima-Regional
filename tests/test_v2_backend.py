@@ -469,6 +469,56 @@ class TestV2MasksAndApply(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(output, torch.full_like(output, 0.25)))
 
+    def test_multi_character_guard_keeps_attention_output_three_dimensional(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.75),
+            region("b", "bob", 0.25, 0.75),
+        ]
+        for guard in ("soft", "strong"):
+            with self.subTest(guard=guard):
+                pack = AnimaRegionalPromptPackV2().pack(
+                    FakeClip(),
+                    layout([alice, bob], regions),
+                    "background",
+                    "",
+                    conditioning(100.0),
+                )[0]
+                pack["background_conditioning"]["raw"] = torch.full(
+                    (1, 2, 4), 10.0
+                )
+                pack["characters"][0]["identity_conditioning"]["raw"] = torch.full(
+                    (1, 2, 4), 13.0
+                )
+                pack["characters"][1]["identity_conditioning"]["raw"] = torch.full(
+                    (1, 2, 4), 17.0
+                )
+                patched, _, _, _ = AnimaRegionalApplyV2().apply(
+                    FakeModel(),
+                    pack,
+                    True,
+                    "replace",
+                    {"multi_character_guard": guard},
+                )
+                patch = patched.object_patches[
+                    "diffusion_model.blocks.0.cross_attn.forward"
+                ]
+                state = patch.router.state
+                state["input_shape"] = (2, 4, 4, 8)
+                context = torch.tensor([100.0, 200.0]).view(2, 1, 1).expand(
+                    2, 2, 4
+                )
+                output = patch(
+                    torch.zeros((2, 8, 4)),
+                    context,
+                    transformer_options={"cond_or_uncond": [0, 1]},
+                )
+
+                self.assertEqual(tuple(output.shape), (2, 8, 4))
+                self.assertEqual(tuple(state["last_overlap_mask"].shape), (2, 8, 1))
+                self.assertTrue(torch.any(state["last_overlap_mask"][0] > 0.0))
+                self.assertTrue(torch.all(output[1] == 200.0))
+
     def test_shared_delta_uses_character_minus_shared_scene(self):
         alice = character("alice", "Alice")
         pack = AnimaRegionalPromptPackV2().pack(

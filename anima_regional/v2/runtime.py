@@ -226,12 +226,17 @@ def _v2_weights(state, x, reference, body_expand=0.0):
         overlap = (raw.to(torch.float32).sum(dim=0) - 1.0).clamp(0.0, 1.0)
         overlap = overlap.reshape(1, 1, grid_h * grid_w, 1).expand(
             int(x.shape[0]), temporal, grid_h * grid_w, 1
-        ).reshape(1, int(x.shape[0]), temporal * grid_h * grid_w, 1)
+        ).reshape(int(x.shape[0]), temporal * grid_h * grid_w, 1)
         state.setdefault("mask_overlap_cache", {})[cache_key] = overlap.to(
             device=reference.device, dtype=reference.dtype
         )
     state["last_overlap_mask"] = state.setdefault("mask_overlap_cache", {}).get(
-        cache_key, torch.zeros((1, int(x.shape[0]), temporal * grid_h * grid_w, 1), device=reference.device, dtype=reference.dtype)
+        cache_key,
+        torch.zeros(
+            (int(x.shape[0]), temporal * grid_h * grid_w, 1),
+            device=reference.device,
+            dtype=reference.dtype,
+        ),
     )
     return weights
 

@@ -774,7 +774,7 @@ function setCharacterPromptWidgetPresentation(node) {
   const presentation = {
     prompt: [
       "legacy / extra character prompt",
-      "Old workflows can keep the full character prompt here. For the split workflow, leave it empty or use it only for extra character-local details that are neither stable identity nor pose.",
+      "Legacy compatibility field. If identity_prompt is filled, this field is ignored to prevent duplicated identity/pose semantics.",
     ],
     identity_prompt: [
       "identity prompt (stable traits)",
@@ -800,8 +800,12 @@ function setCharacterPromptWidgetPresentation(node) {
 function setPromptPackWidgetPresentation(node) {
   const presentation = {
     global_prompt: [
-      "shared scene context",
-      "Shared scene description. Connect Anima Regional - Shared Scene Prompt to reuse it in Artist Pack and this Prompt Pack.",
+      "background / style prompt",
+      "Only background, lighting, camera and style. Keep character count, names and poses in layout_prompt or Character nodes.",
+    ],
+    layout_prompt: [
+      "group layout / presence",
+      "Shared composition, number of people, upper-body framing and interaction. It is routed once over the union of the Body boxes.",
     ],
     negative_prompt: ["negative prompt", "Optional text negative prompt. It is ignored when external negative conditioning is connected."],
     base_positive: ["external base positive (Mixer output)", "Connect the Post-Adapter Mixer's final positive conditioning here."],
@@ -826,8 +830,8 @@ app.registerExtension({
       else {
         const item = widget(this, "scene_prompt");
         if (item) {
-          item.label = "shared scene prompt";
-          item.tooltip = "Enter the shared scene description once, then connect this STRING output to Artist Pack and Regional Prompt Pack.";
+          item.label = "background / style prompt";
+          item.tooltip = "Enter background, lighting and style once. Keep group count and interaction in Prompt Pack layout_prompt.";
         }
       }
       return result;

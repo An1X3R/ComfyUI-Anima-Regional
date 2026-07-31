@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-anima-regional"
-version = "0.3.4"
+version = "0.4.0"
 description = "Training-free regional prompt routing for the Anima diffusion model in ComfyUI"
 requires-python = ">=3.10"
 

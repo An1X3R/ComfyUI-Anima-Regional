@@ -35,24 +35,14 @@ IDENTITY_DETAIL_NORM_CAP = 1.5
 
 
 def _multi_character_profile(state):
-    """Return (replace branch scale, aggregate residual cap) for many characters.
-
-    The guard is intentionally opt-in so old workflows remain numerically
-    unchanged.  It borrows the Mixer's base-anchored idea: when four or more
-    branches are active, replace mode blends each branch with the real base
-    instead of replacing it wholesale, and both modes receive a final
-    per-token residual budget.
-    """
+    """Return a local-overlap guard, never a global character-count scale."""
     mode = str(state.get("multi_character_guard", "off"))
-    count = max(1, len(state.get("characters", ())))
-    if mode == "off" or count <= 2:
+    if mode == "off":
         return 1.0, None
     if mode == "soft":
-        return math.sqrt(2.0 / count), 2.0
+        return 1.0, 2.0
     if mode == "strong":
-        return 2.0 / count, 1.5
-    # Runtime validation rejects this, but a safe fallback keeps direct unit
-    # calls and partially constructed states from amplifying a branch.
+        return 1.0, 1.5
     return 1.0, None
 
 
@@ -93,7 +83,13 @@ def _sampling_progress(state):
 
 
 def _identity_detail_scale(state):
-    """Fade in the optional identity-only branch during late denoising."""
+    """Legacy-only late identity schedule.
+
+    ``separated_v1`` does not call this helper: its identity branch is already
+    part of the single background-relative residual budget below.  Keep the
+    helper for saved legacy packs and tests, but do not use it as a second
+    identity injection in the new route.
+    """
     if str(state.get("identity_detail_mode", "off")) != "late":
         return 0.0
     progress = _sampling_progress(state)
@@ -164,9 +160,25 @@ def _cap_residual_delta(delta, base, cap_factor):
     base_f = base.to(torch.float32)
     delta_norm = delta_f.square().sum(dim=-1, keepdim=True).sqrt()
     base_norm = base_f.square().sum(dim=-1, keepdim=True).sqrt()
+    if float(base_norm.detach().amax()) < 1e-5:
+        return delta
     limit = base_norm.clamp_min(1e-3) * factor
     scale = (limit / delta_norm.clamp_min(1e-6)).clamp(max=1.0)
     return (delta_f * scale).to(dtype=delta.dtype)
+
+
+def _blend_identity_residual(main_delta, identity_delta, floor, anchor_strength):
+    """Legacy-only identity floor helper.
+
+    The separated route applies its floor directly to ``identity_total`` so
+    pose and layout residuals cannot be lifted by the identity setting.
+    """
+    floor = max(0.0, min(1.0, float(floor)))
+    anchor_strength = max(0.0, min(1.0, float(anchor_strength)))
+    identity_scale = max(1.0, floor)
+    if anchor_strength <= 0.0:
+        return main_delta, identity_delta
+    return main_delta, identity_delta * (1.0 + (identity_scale - 1.0) * anchor_strength)
 
 
 def _sigma_range(model, start_percent, end_percent):
@@ -198,7 +210,7 @@ def _v2_weights(state, x, reference, body_expand=0.0):
     cache = state.setdefault("mask_cache", {})
     weights = cache.get(cache_key)
     if weights is None:
-        _, ownership = build_character_masks(
+        raw, ownership = build_character_masks(
             state["layout"],
             grid_h,
             grid_w,
@@ -211,11 +223,26 @@ def _v2_weights(state, x, reference, body_expand=0.0):
             -1, int(x.shape[0]), temporal, -1, -1
         ).reshape(len(ownership), int(x.shape[0]), temporal * grid_h * grid_w, 1)
         cache[cache_key] = weights
+        overlap = (raw.to(torch.float32).sum(dim=0) - 1.0).clamp(0.0, 1.0)
+        overlap = overlap.reshape(1, 1, grid_h * grid_w, 1).expand(
+            int(x.shape[0]), temporal, grid_h * grid_w, 1
+        ).reshape(1, int(x.shape[0]), temporal * grid_h * grid_w, 1)
+        state.setdefault("mask_overlap_cache", {})[cache_key] = overlap.to(
+            device=reference.device, dtype=reference.dtype
+        )
+    state["last_overlap_mask"] = state.setdefault("mask_overlap_cache", {}).get(
+        cache_key, torch.zeros((1, int(x.shape[0]), temporal * grid_h * grid_w, 1), device=reference.device, dtype=reference.dtype)
+    )
     return weights
 
 
 def _v2_identity_core_weights(state, x, reference):
-    """Expand body-interior identity weights to the current attention shape."""
+    """Legacy-only body-core weights retained for old option payloads.
+
+    The current ``separated_v1`` path intentionally uses the ordinary Body
+    ownership mask for identity.  A second core multiplier would silently
+    create another strength control and make contact regions harder to tune.
+    """
     temporal, grid_h, grid_w = infer_grid_shape(
         int(x.shape[1]),
         state.get("input_shape"),
@@ -275,12 +302,27 @@ class V2RegionalCrossAttention:
         if cached is None:
             cached = []
             for character in self.state["characters"]:
+                pose_spec = character.get("pose_conditioning")
+                identity_spec = character.get("identity_conditioning")
+                if (
+                    self.state.get("routing_contract") == "separated_v1"
+                    and pose_spec is None
+                    and isinstance(identity_spec, dict)
+                ):
+                    cached.append(None)
+                    continue
+                spec = pose_spec or character.get("conditioning")
                 cached.append(preprocess_conditioning(
-                    self.state["diffusion_model"], character["conditioning"],
+                    self.state["diffusion_model"], spec,
                     reference_context.device, reference_context.dtype,
                 ).detach())
             self.state["context_cache"][key] = cached
-        return [broadcast_context(value, int(reference_context.shape[0])) for value in cached]
+        return [
+            None
+            if value is None
+            else broadcast_context(value, int(reference_context.shape[0]))
+            for value in cached
+        ]
 
     def _identity_contexts(self, reference_context):
         """Return optional stable-identity contexts, preserving character order."""
@@ -310,7 +352,7 @@ class V2RegionalCrossAttention:
         ]
 
     def _shared_context(self, reference_context):
-        spec = self.state.get("shared_conditioning")
+        spec = self.state.get("background_conditioning") or self.state.get("shared_conditioning")
         if not isinstance(spec, dict):
             return None
         key = (str(reference_context.device), str(reference_context.dtype))
@@ -325,138 +367,170 @@ class V2RegionalCrossAttention:
             self.state["shared_context_cache"][key] = cached
         return broadcast_context(cached, int(reference_context.shape[0]))
 
+    def _layout_context(self, reference_context):
+        spec = self.state.get("layout_conditioning")
+        if not isinstance(spec, dict):
+            return None
+        key = (str(reference_context.device), str(reference_context.dtype))
+        cached = self.state.setdefault("layout_context_cache", {}).get(key)
+        if cached is None:
+            cached = preprocess_conditioning(
+                self.state["diffusion_model"],
+                spec,
+                reference_context.device,
+                reference_context.dtype,
+            ).detach()
+            self.state["layout_context_cache"][key] = cached
+        return broadcast_context(cached, int(reference_context.shape[0]))
+
     def forward(self, x, context=None, rope_emb=None, transformer_options=None):
         options = transformer_options or {}
-        if context is None or self.layer_index in self.state.get("disabled_layers", set()) or not _sigma_is_active(self.state):
-            return self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
-        base = self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
-        contexts = self._contexts(context)
-        identity_detail_scale = _identity_detail_scale(self.state)
-        identity_contexts = None
         if (
-            identity_detail_scale > 0.0
-            and float(self.state.get("global_strength", 1.0)) > 0.0
-            and self.state.get("has_identity_conditioning", False)
+            context is None
+            or self.layer_index in self.state.get("disabled_layers", set())
+            or not _sigma_is_active(self.state)
         ):
-            identity_contexts = self._identity_contexts(context)
+            return self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
+
+        base = self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
+        routing_contract = self.state.get("routing_contract", "legacy_v2")
+        contexts = self._contexts(context)
+        identity_contexts = (
+            self._identity_contexts(context)
+            if self.state.get("has_identity_conditioning", False)
+            else [None] * len(self.state["characters"])
+        )
         identity_anchor_mode = str(self.state.get("identity_anchor_mode", "off"))
-        anchor_strength = 0.0
-        if identity_anchor_mode == "shared_delta":
-            anchor_strength = max(
-                0.0,
-                min(1.0, float(self.state.get("identity_anchor_strength", 1.0))),
-            )
-        shared_output = base
-        needs_shared_output = (
-            identity_anchor_mode == "shared_delta" and anchor_strength > 0.0
-        ) or identity_contexts is not None
-        if needs_shared_output:
-            if not self.state.get("shared_is_final", False):
-                shared_context = self._shared_context(context)
-                if shared_context is not None:
-                    shared_output = self.inner_forward(
-                        x,
-                        shared_context,
-                        rope_emb=rope_emb,
-                        transformer_options=options,
-                    )
+        anchor_strength = (
+            max(0.0, min(1.0, float(self.state.get("identity_anchor_strength", 1.0))))
+            if identity_anchor_mode == "shared_delta"
+            else 0.0
+        )
+
+        # The actual positive input is the base branch. When it came from an
+        # external Mixer, evaluate the standalone background once so character
+        # branches can remove that common response without duplicating it.
+        background_output = base
+        if not self.state.get("background_is_final", self.state.get("shared_is_final", False)):
+            background_context = self._shared_context(context)
+            if background_context is not None:
+                background_output = self.inner_forward(
+                    x, background_context, rope_emb=rope_emb, transformer_options=options
+                )
+
+        layout_context = self._layout_context(context)
+        layout_output = (
+            self.inner_forward(x, layout_context, rope_emb=rope_emb, transformer_options=options)
+            if layout_context is not None
+            else background_output
+        )
         composition_multiplier, body_expand = _composition_profile(self.state)
         branch_scale, residual_cap = _multi_character_profile(self.state)
-        weights = _v2_weights(self.state, x, base, body_expand=body_expand)
-        weights = _shape_region_weights(
-            weights,
-            self.state.get("edge_focus_power", 1.0),
-        )
-        flags = _expand_cond_flags(options.get("cond_or_uncond", self.state.get("cond_or_uncond")), int(x.shape[0]))
-        conditional = torch.tensor(flags, device=base.device, dtype=base.dtype).view(1, int(x.shape[0]), 1, 1)
-        weights = weights * conditional
-        delta_total = torch.zeros_like(base)
         global_strength = float(self.state.get("global_strength", 1.0))
-        for index, (character, character_context) in enumerate(zip(self.state["characters"], contexts)):
+        has_layout = layout_context is not None
+        layout_weights = _v2_weights(self.state, x, base, body_expand=body_expand)
+        layout_overlap = self.state.get("last_overlap_mask")
+        identity_weights = _v2_weights(self.state, x, base, body_expand=0.0)
+        layout_weights = _shape_region_weights(
+            layout_weights, self.state.get("edge_focus_power", 1.0)
+        )
+        identity_weights = _shape_region_weights(
+            identity_weights, self.state.get("edge_focus_power", 1.0)
+        )
+        flags = _expand_cond_flags(
+            options.get("cond_or_uncond", self.state.get("cond_or_uncond")),
+            int(x.shape[0]),
+        )
+        conditional = torch.tensor(flags, device=base.device, dtype=base.dtype).view(
+            1, int(x.shape[0]), 1, 1
+        )
+        layout_weights = layout_weights * conditional
+        identity_weights = identity_weights * conditional
+        layout_union = layout_weights.sum(dim=0).clamp(0.0, 1.0)
+        layout_delta = layout_output - background_output
+        layout_total = torch.zeros_like(base)
+        if has_layout:
+            layout_total = layout_union * _scale_extended_delta(
+                layout_delta,
+                base,
+                global_strength
+                * max(0.0, float(self.state.get("layout_strength", 1.0)))
+                * composition_multiplier,
+            )
+        pose_total = torch.zeros_like(base)
+        identity_total = torch.zeros_like(base)
+        legacy_total = torch.zeros_like(base)
+
+        for index, (character, character_context) in enumerate(
+            zip(self.state["characters"], contexts)
+        ):
             character_strength = float(character["strength"])
             if global_strength == 0.0 or character_strength == 0.0:
                 continue
-            branch = self.inner_forward(x, character_context, rope_emb=rope_emb, transformer_options=options)
+
+            identity_context = identity_contexts[index]
+            if routing_contract == "separated_v1":
+                if character_context is not None:
+                    pose_branch = self.inner_forward(
+                        x, character_context, rope_emb=rope_emb, transformer_options=options
+                    )
+                    pose_reference = layout_output if has_layout else background_output
+                    pose_delta = pose_branch - pose_reference
+                    if self.state["blend_mode"] == "base_preserve":
+                        pose_delta = _project_perpendicular(pose_delta, base)
+                    pose_total = pose_total + layout_weights[index] * _scale_extended_delta(
+                        pose_delta,
+                        base,
+                        global_strength * character_strength * composition_multiplier,
+                    )
+                if identity_context is not None:
+                    identity_branch = self.inner_forward(
+                        x, identity_context, rope_emb=rope_emb, transformer_options=options
+                    )
+                    identity_delta = identity_branch - background_output
+                    if self.state["blend_mode"] == "base_preserve":
+                        identity_delta = _project_perpendicular(identity_delta, base)
+                    identity_total = identity_total + identity_weights[index] * _scale_extended_delta(
+                        identity_delta,
+                        base,
+                        global_strength * character_strength,
+                    )
+                continue
+
+            if character_context is None:
+                continue
+            branch = self.inner_forward(
+                x, character_context, rope_emb=rope_emb, transformer_options=options
+            )
             base_delta = branch - base
-            if identity_anchor_mode == "shared_delta":
-                identity_delta = branch - shared_output
+            delta = base_delta
+            if identity_anchor_mode == "shared_delta" and anchor_strength > 0.0:
                 delta = (
                     base_delta * (1.0 - anchor_strength)
-                    + identity_delta * anchor_strength
+                    + (branch - background_output) * anchor_strength
                 )
-            else:
-                delta = base_delta
             if self.state["blend_mode"] == "base_preserve":
                 delta = _project_perpendicular(delta, base)
-            routed_strength = global_strength * character_strength * composition_multiplier
-            if self.state["blend_mode"] == "replace":
-                routed_strength *= branch_scale
-            routed_delta = _scale_extended_delta(delta, base, routed_strength)
-            delta_total = delta_total + weights[index] * routed_delta
+            legacy_total = legacy_total + layout_weights[index] * _scale_extended_delta(
+                delta,
+                base,
+                global_strength * character_strength * composition_multiplier * branch_scale,
+            )
+
         detail_scale = _detail_preserve_scale(self.state)
-        if identity_anchor_mode == "shared_delta" and anchor_strength > 0.0:
-            protected_scale = max(
+        if routing_contract == "separated_v1":
+            # Identity floor applies only to the isolated identity residual.
+            identity_scale = max(
                 detail_scale,
-                max(
-                    0.0,
-                    min(1.0, float(self.state.get("identity_late_floor", 0.8))),
-                ),
+                max(0.0, min(1.0, float(self.state.get("identity_late_floor", 0.0)))),
             )
-            # Strength zero remains an exact A/B baseline. Intermediate values
-            # introduce the late identity floor gradually instead of abruptly.
-            detail_scale = (
-                detail_scale * (1.0 - anchor_strength)
-                + protected_scale * anchor_strength
-            )
-        main_delta = _cap_residual_delta(
-            delta_total * detail_scale,
-            base,
-            residual_cap,
-        )
-        identity_total = torch.zeros_like(base)
-        if identity_contexts is not None:
-            core_weights = _v2_identity_core_weights(self.state, x, base)
-            core_strength = max(
-                1.0,
-                min(
-                    3.0,
-                    float(self.state.get("identity_core_strength", 1.5)),
-                ),
-            )
-            for index, (character, identity_context) in enumerate(
-                zip(self.state["characters"], identity_contexts)
-            ):
-                if identity_context is None:
-                    continue
-                character_strength = float(character["strength"])
-                if character_strength == 0.0:
-                    continue
-                identity_branch = self.inner_forward(
-                    x,
-                    identity_context,
-                    rope_emb=rope_emb,
-                    transformer_options=options,
-                )
-                identity_delta = identity_branch - shared_output
-                routed_identity = _scale_extended_delta(
-                    identity_delta,
-                    base,
-                    global_strength
-                    * character_strength
-                    * identity_detail_scale,
-                )
-                core_multiplier = 1.0 + core_weights[index] * (
-                    core_strength - 1.0
-                )
-                identity_total = identity_total + (
-                    weights[index] * core_multiplier * routed_identity
-                )
-            identity_total = _cap_residual_delta(
-                identity_total,
-                base + main_delta,
-                IDENTITY_DETAIL_NORM_CAP,
-            )
-        return base + main_delta + identity_total
+            routed = layout_total * detail_scale + pose_total * detail_scale + identity_total * identity_scale
+        else:
+            routed = legacy_total * detail_scale
+        if residual_cap is not None and layout_overlap is not None:
+            capped = _cap_residual_delta(routed, base, residual_cap)
+            routed = routed * (1.0 - layout_overlap) + capped * layout_overlap
+        return base + routed
 
 
 class V2RegionalForwardPatch:
@@ -481,6 +555,9 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     if not valid:
         raise _error(f"unsupported model: {reason}")
     options = dict(advanced_options or {})
+    routing_contract = regional_pack.get("routing_contract", "legacy_v2")
+    if routing_contract not in ("legacy_v2", "separated_v1"):
+        raise _error("regional pack has an unsupported routing contract")
     start_block = max(0, int(options.get("start_block", 0)))
     requested_end = int(options.get("end_block", -1))
     end_block = block_count - 1 if requested_end < 0 else min(block_count - 1, requested_end)
@@ -506,6 +583,9 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     composition_end_percent = float(options.get("composition_end_percent", 0.55))
     if not 0.05 <= composition_end_percent <= 1.0:
         raise _error("composition_end_percent must be between 0.05 and 1")
+    layout_strength = float(options.get("layout_strength", 1.0))
+    if not 0.0 <= layout_strength <= 2.0:
+        raise _error("layout_strength must be between 0 and 2")
     multi_character_guard = str(options.get("multi_character_guard", "off"))
     if multi_character_guard not in MULTI_CHARACTER_GUARDS:
         raise _error(
@@ -551,7 +631,11 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         raise _error("identity_core_radius must be between 0.05 and 1")
     if (
         identity_anchor_mode == "shared_delta"
-        and not isinstance(regional_pack.get("shared_conditioning"), dict)
+        and not isinstance(
+            regional_pack.get("background_conditioning")
+            or regional_pack.get("shared_conditioning"),
+            dict,
+        )
     ):
         raise _error(
             "shared_delta identity anchoring requires a Prompt Pack with "
@@ -639,6 +723,7 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "composition_strength": composition_strength,
         "composition_expand": composition_expand,
         "composition_end_percent": composition_end_percent,
+        "layout_strength": layout_strength,
         "composition_sigma_range": composition_sigma_range,
         "multi_character_guard": multi_character_guard,
         "detail_preserve_mode": detail_preserve_mode,
@@ -647,6 +732,7 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "detail_sigma_range": detail_sigma_range,
         "sampling_sigma_range": sampling_sigma_range,
         "edge_focus_power": edge_focus_power,
+        "routing_contract": routing_contract,
         "identity_anchor_mode": identity_anchor_mode,
         "identity_anchor_strength": identity_anchor_strength,
         "identity_late_floor": identity_late_floor,
@@ -656,8 +742,16 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "identity_core_strength": identity_core_strength,
         "identity_core_radius": identity_core_radius,
         "has_identity_conditioning": has_identity_conditioning,
-        "shared_conditioning": regional_pack.get("shared_conditioning"),
+        "background_conditioning": regional_pack.get("background_conditioning")
+        or regional_pack.get("shared_conditioning"),
+        "background_is_final": bool(
+            regional_pack.get("background_is_final", regional_pack.get("shared_is_final", False))
+        ),
+        # Legacy names remain in state for third-party inspectors.
+        "shared_conditioning": regional_pack.get("shared_conditioning")
+        or regional_pack.get("background_conditioning"),
         "shared_is_final": bool(regional_pack.get("shared_is_final", False)),
+        "layout_conditioning": regional_pack.get("layout_conditioning"),
         "patch_spatial": int(getattr(diffusion_model, "patch_spatial", 2)),
         "patch_temporal": int(getattr(diffusion_model, "patch_temporal", 1)),
         "sigma_range": _sigma_range(model, start_percent, end_percent),
@@ -668,6 +762,7 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "context_cache": {},
         "identity_context_cache": {},
         "shared_context_cache": {},
+        "layout_context_cache": {},
         "mask_cache": {},
         "identity_core_cache": {},
         "disabled_layers": set(),

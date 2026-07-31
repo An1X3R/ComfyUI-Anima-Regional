@@ -43,6 +43,7 @@ for node_id in (
     "AnimaRegionalCharacterPromptV2",
     "AnimaRegionalLayoutV2",
     "AnimaRegionalPromptPackV2",
+    "AnimaRegionalOptionsV2",
     "AnimaRegionalSharedPromptV2",
     "AnimaRegionalApplyV2",
     "AnimaRegionalInspectV2",

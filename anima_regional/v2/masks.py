@@ -41,6 +41,26 @@ def _expanded_body_region(region, amount: float):
     return expanded
 
 
+def _distance_to_region_center(region, yy, xx):
+    """Return squared canvas-space distance to a box's original center."""
+    center_x = float(region["x"]) + float(region["width"]) * 0.5
+    center_y = float(region["y"]) + float(region["height"]) * 0.5
+    return (xx - center_x).square() + (yy - center_y).square()
+
+
+def _stable_uuid_tie_break(ordered, device):
+    """Return an order-independent epsilon rank for exact Voronoi ties."""
+    rank_by_uuid = {
+        identifier: rank
+        for rank, identifier in enumerate(sorted(ordered))
+    }
+    return torch.tensor(
+        [rank_by_uuid[identifier] for identifier in ordered],
+        device=device,
+        dtype=torch.float32,
+    ).view(-1, 1, 1) * 1e-7
+
+
 def build_raw_region_masks(layout, height: int, width: int, device=None, dtype=torch.float32):
     """Return one raw inspection mask for every enabled body or Hint box."""
     device = device or torch.device("cpu")
@@ -88,6 +108,17 @@ def build_character_masks(
     characters = layout["characters"]
     raw = {item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype) for item in characters}
     hints = {item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype) for item in characters}
+    x = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) / width
+    y = (torch.arange(height, device=device, dtype=torch.float32) + 0.5) / height
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    body_distance = {
+        item["uuid"]: torch.full((height, width), torch.inf, device=device)
+        for item in characters
+    }
+    hint_distance = {
+        item["uuid"]: torch.full((height, width), torch.inf, device=device)
+        for item in characters
+    }
     for region in layout["regions"]:
         if not region["enabled"]:
             continue
@@ -97,8 +128,17 @@ def build_character_masks(
             else region
         )
         mask = _box(source, height, width, device, dtype)
-        target = raw if region["type"] == "body_region" else hints
-        target[region["character_uuid"]] = torch.maximum(target[region["character_uuid"]], mask)
+        is_body = region["type"] == "body_region"
+        target = raw if is_body else hints
+        distance_target = body_distance if is_body else hint_distance
+        key = region["character_uuid"]
+        target[key] = torch.maximum(target[key], mask)
+        distance = _distance_to_region_center(region, yy, xx)
+        distance_target[key] = torch.where(
+            mask > 1e-4,
+            torch.minimum(distance_target[key], distance),
+            distance_target[key],
+        )
 
     ordered = [item["uuid"] for item in characters]
     raw_stack = torch.stack([raw[key] for key in ordered])
@@ -107,17 +147,26 @@ def build_character_masks(
         return raw_stack, raw_stack * torch.where(total > 1.0, total.reciprocal(), torch.ones_like(total))
 
     hint_stack = torch.stack([hints[key] for key in ordered])
-    # A Hint is local effective coverage, not a mutation of raw body union.
-    # Its score makes the bound character win only inside the Hint box.
-    coverage = torch.maximum(raw_stack, hint_stack)
-    scores = coverage.to(torch.float32).clone()
-    scores = scores + (hint_stack > 1e-4).to(scores.dtype) * 2.0
-    tie_break = torch.arange(len(ordered), device=device, dtype=scores.dtype)
-    scores = scores - tie_break.view(-1, 1, 1) * 1e-7
-    scores = torch.where(coverage > 1e-4, scores, torch.full_like(scores, -torch.inf))
-    winner = scores.argmax(dim=0)
-    active = torch.isfinite(scores).any(dim=0)
+    body_distance_stack = torch.stack([body_distance[key] for key in ordered])
+    hint_distance_stack = torch.stack([hint_distance[key] for key in ordered])
+    tie_break = _stable_uuid_tie_break(ordered, device)
+
+    # Body overlaps use a true nearest-center/Voronoi decision.  This removes
+    # the previous list-order bias while preserving hard exclusive ownership.
+    body_scores = body_distance_stack + tie_break
+    body_active = torch.isfinite(body_scores).any(dim=0)
+    body_winner = body_scores.argmin(dim=0)
+
+    # Ownership Hints are explicit local overrides.  When Hints themselves
+    # intersect, their nearest original center decides without socket order.
+    hint_scores = hint_distance_stack + tie_break
+    hint_active = torch.isfinite(hint_scores).any(dim=0)
+    hint_winner = hint_scores.argmin(dim=0)
+
+    winner = torch.where(hint_active, hint_winner, body_winner)
+    active = hint_active | body_active
     owners = torch.arange(len(ordered), device=device).view(-1, 1, 1) == winner.unsqueeze(0)
+    coverage = torch.maximum(raw_stack, hint_stack)
     effective = coverage * owners.to(dtype) * active.unsqueeze(0).to(dtype)
     effective = _apply_internal_boundary_falloff(
         effective,

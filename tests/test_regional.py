@@ -544,13 +544,13 @@ class TestNodes(unittest.TestCase):
         self.assertTrue(torch.all(norm <= cap + 1e-5))
         self.assertTrue(torch.any(capped < large_delta * 4.0))
 
-    def test_multi_character_guard_scales_only_three_or_more_branches(self):
-        self.assertEqual(_multi_character_profile({"multi_character_guard": "soft", "characters": [1, 2]}), (1.0, None))
+    def test_multi_character_guard_never_scales_by_global_character_count(self):
+        self.assertEqual(_multi_character_profile({"multi_character_guard": "soft", "characters": [1, 2]}), (1.0, 2.0))
         soft_scale, soft_cap = _multi_character_profile({"multi_character_guard": "soft", "characters": [1, 2, 3, 4]})
         strong_scale, strong_cap = _multi_character_profile({"multi_character_guard": "strong", "characters": [1, 2, 3, 4]})
-        self.assertAlmostEqual(soft_scale, 2.0 ** -0.5)
+        self.assertEqual(soft_scale, 1.0)
         self.assertEqual(soft_cap, 2.0)
-        self.assertEqual(strong_scale, 0.5)
+        self.assertEqual(strong_scale, 1.0)
         self.assertEqual(strong_cap, 1.5)
 
     def test_multi_character_residual_budget_caps_aggregate_delta(self):

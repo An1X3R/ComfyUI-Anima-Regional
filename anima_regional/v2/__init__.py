@@ -6,6 +6,7 @@ from .nodes import (
     AnimaRegionalInspectV2,
     AnimaRegionalLayoutV2,
     AnimaRegionalPromptPackV2,
+    AnimaRegionalOptionsV2,
     AnimaRegionalSharedPromptV2,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "AnimaRegionalInspectV2",
     "AnimaRegionalLayoutV2",
     "AnimaRegionalPromptPackV2",
+    "AnimaRegionalOptionsV2",
     "AnimaRegionalSharedPromptV2",
 ]

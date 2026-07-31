@@ -16,6 +16,7 @@ from anima_regional.v2.nodes import (
     AnimaRegionalCharacterPromptV2,
     AnimaRegionalInspectV2,
     AnimaRegionalLayoutV2,
+    AnimaRegionalOptionsV2,
     AnimaRegionalPromptPackV2,
     AnimaRegionalSharedPromptV2,
 )
@@ -123,6 +124,16 @@ class TestV2DataContract(unittest.TestCase):
             AnimaRegionalApplyV2.INPUT_TYPES()["optional"]["advanced_options"][0],
             "ANIMA_REGIONAL_OPTIONS",
         )
+        self.assertIs(NODE_CLASS_MAPPINGS["AnimaRegionalOptionsV2"], AnimaRegionalOptionsV2)
+
+    def test_v2_options_expose_only_effective_routing_controls(self):
+        inputs = AnimaRegionalOptionsV2.INPUT_TYPES()
+        self.assertNotIn("self_attention_mode", inputs["required"])
+        self.assertNotIn("branch_chunk_size", inputs["required"])
+        self.assertIn("layout_strength", inputs["optional"])
+        options = AnimaRegionalOptionsV2().build(1.0, 0, -1, 0.0, 1.0, layout_strength=1.25)[0]
+        self.assertEqual(options["options_contract"], "v2_routing_v1")
+        self.assertEqual(options["layout_strength"], 1.25)
 
     def test_shared_scene_prompt_is_a_fanout_safe_string(self):
         node = AnimaRegionalSharedPromptV2()
@@ -160,7 +171,7 @@ class TestV2DataContract(unittest.TestCase):
         self.assertEqual(payload["identity_prompt"], "brown hair, blue eyes, white coat")
         self.assertEqual(payload["pose_prompt"], "reaching toward the right")
 
-    def test_prompt_pack_keeps_legacy_encoding_and_adds_identity_only_when_present(self):
+    def test_prompt_pack_separates_background_layout_identity_and_pose(self):
         alice = AnimaRegionalCharacterPromptV2().build(
             "Alice",
             "",
@@ -176,17 +187,43 @@ class TestV2DataContract(unittest.TestCase):
             layout([alice], [region("a", "alice", 0.0, 1.0)]),
             "shared scene",
             "negative",
+            layout_prompt="two people, one on each side",
         )[0]
         self.assertEqual(
             clip.encoded,
             [
                 "shared scene",
                 "negative",
-                "brown hair, blue eyes\nreaching toward the right\nshared scene",
-                "brown hair, blue eyes\nshared scene",
+                "two people, one on each side",
+                "brown hair, blue eyes",
+                "reaching toward the right",
             ],
         )
+        self.assertEqual(pack["routing_contract"], "separated_v1")
         self.assertIn("identity_conditioning", pack["characters"][0])
+        self.assertIn("pose_conditioning", pack["characters"][0])
+        self.assertIsNotNone(pack["layout_conditioning"])
+
+    def test_split_identity_ignores_stale_legacy_prompt_with_warning(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "old full prompt with duplicated clothes and pose",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes",
+            "reaching toward the right",
+        )[0]
+        clip = FakeClip()
+        pack = AnimaRegionalPromptPackV2().pack(
+            clip,
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "background",
+            "",
+        )[0]
+        self.assertNotIn("old full prompt", "\n".join(clip.encoded))
+        self.assertTrue(pack["characters"][0]["legacy_prompt_ignored"])
+        self.assertEqual(len(pack["warnings"]), 1)
 
     def test_reordered_character_inputs_preserve_uuid_bindings(self):
         alice, bob = character("alice", "Alice"), character("bob", "Bob")
@@ -224,8 +261,9 @@ class TestV2DataContract(unittest.TestCase):
         clip = FakeClip()
         pack = AnimaRegionalPromptPackV2().pack(clip, layout([alice], regions), "global", "negative")[0]
         self.assertEqual(len(pack["characters"]), 1)
-        self.assertEqual(clip.encoded, ["global", "negative", "Alice prompt\nglobal"])
+        self.assertEqual(clip.encoded, ["global", "negative", "Alice prompt"])
         self.assertTrue(pack["shared_is_final"])
+        self.assertTrue(pack["background_is_final"])
         self.assertIs(pack["shared_conditioning"]["raw"], pack["positive"][0][0])
 
     def test_external_conditioning_remains_final_while_shared_scene_is_encoded(self):
@@ -237,8 +275,9 @@ class TestV2DataContract(unittest.TestCase):
         self.assertIs(positive, external_positive)
         self.assertIs(negative, external_negative)
         self.assertEqual(status, "disabled; original model returned")
-        self.assertEqual(clip.encoded, ["global", "Alice prompt\nglobal"])
+        self.assertEqual(clip.encoded, ["global", "Alice prompt"])
         self.assertFalse(pack["shared_is_final"])
+        self.assertFalse(pack["background_is_final"])
         self.assertIsNot(pack["shared_conditioning"]["raw"], external_positive[0][0])
 
     def test_invalid_conditioning_is_rejected_before_runtime(self):
@@ -324,6 +363,46 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertTrue(torch.all(exclusive.sum(dim=0) <= 1.0))
         _, normalized = build_character_masks(layout([alice, bob], regions, "normalized"), 1, 8)
         self.assertEqual(float(normalized[0, 0, 2]), 0.5)  # Hint is ignored in normalized mode.
+
+    def test_exclusive_overlap_uses_nearest_body_center_not_character_order(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.6),
+            region("b", "bob", 0.4, 0.6),
+        ]
+        _, forward = build_character_masks(layout([alice, bob], regions), 1, 10)
+        _, reordered = build_character_masks(layout([bob, alice], regions), 1, 10)
+
+        forward_by_id = {"alice": forward[0], "bob": forward[1]}
+        reordered_by_id = {"bob": reordered[0], "alice": reordered[1]}
+        self.assertTrue(torch.equal(forward_by_id["alice"], reordered_by_id["alice"]))
+        self.assertTrue(torch.equal(forward_by_id["bob"], reordered_by_id["bob"]))
+        self.assertEqual(int(forward_by_id["alice"].sum()), 5)
+        self.assertEqual(int(forward_by_id["bob"].sum()), 5)
+
+    def test_ownership_hint_overrides_body_voronoi_only_inside_hint(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.6),
+            region("b", "bob", 0.4, 0.6),
+            region("hint", "bob", 0.3, 0.1, "ownership_hint"),
+        ]
+        _, effective = build_character_masks(layout([alice, bob], regions), 1, 10)
+        self.assertEqual(float(effective[1, 0, 3]), 1.0)
+        self.assertEqual(float(effective[0, 0, 3]), 0.0)
+        self.assertEqual(float(effective[0, 0, 2]), 1.0)
+
+    def test_early_expansion_keeps_symmetric_voronoi_ownership(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.5),
+            region("b", "bob", 0.5, 0.5),
+        ]
+        _, expanded = build_character_masks(
+            layout([alice, bob], regions), 1, 64, body_expand=0.04
+        )
+        self.assertEqual(int(expanded[0].sum()), 32)
+        self.assertEqual(int(expanded[1].sum()), 32)
 
     def test_early_body_expansion_does_not_expand_ownership_hint(self):
         alice = character("alice", "Alice")
@@ -484,7 +563,7 @@ class TestV2MasksAndApply(unittest.TestCase):
         calls = model.diffusion_model.blocks[0].cross_attn.context_means
         self.assertEqual(calls, [100.0, 10.0, 11.0, 12.0])
 
-    def test_zero_identity_strength_is_exact_baseline_without_shared_call(self):
+    def test_separated_pack_uses_one_background_relative_identity_residual(self):
         alice = character("alice", "Alice")
         model = FakeModel()
         pack = AnimaRegionalPromptPackV2().pack(
@@ -520,10 +599,40 @@ class TestV2MasksAndApply(unittest.TestCase):
             torch.full((1, 2, 4), 100.0),
             transformer_options={"cond_or_uncond": [0]},
         )
-        self.assertTrue(torch.allclose(output, torch.full_like(output, 82.6)))
+        self.assertTrue(torch.allclose(output, torch.full_like(output, 102.4)))
         self.assertEqual(
             model.diffusion_model.blocks[0].cross_attn.context_means,
-            [100.0, 13.0],
+            [100.0, 10.0, 13.0],
+        )
+
+    def test_separated_pack_routes_group_layout_once_over_body_union(self):
+        alice = character("alice", "Alice")
+        model = FakeModel()
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "background",
+            "",
+            conditioning(100.0),
+            layout_prompt="one person centered",
+        )[0]
+        pack["background_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
+        pack["layout_conditioning"]["raw"] = torch.full((1, 2, 4), 20.0)
+        pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
+        patched, _, _, _ = AnimaRegionalApplyV2().apply(
+            model, pack, True, "replace", {"layout_strength": 1.0}
+        )
+        patch = patched.object_patches["diffusion_model.blocks.0.cross_attn.forward"]
+        patch.router.state["input_shape"] = (1, 4, 4, 8)
+        output = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertTrue(torch.allclose(output, torch.full_like(output, 113.0)))
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [100.0, 10.0, 20.0, 13.0],
         )
 
     def test_shared_delta_broadcasts_context_and_preserves_runtime_dtype(self):
@@ -646,12 +755,12 @@ class TestV2MasksAndApply(unittest.TestCase):
         )
         self.assertEqual(
             model.diffusion_model.blocks[0].cross_attn.context_means,
-            [100.0, 10.0, 13.0, 15.0],
+            [100.0, 10.0, 1.0, 15.0],
         )
         self.assertTrue(torch.all(output >= 13.0))
         self.assertGreater(float(output.max()), 13.0)
         self.assertTrue(state["identity_context_cache"])
-        self.assertTrue(state["identity_core_cache"])
+        self.assertEqual(state["identity_core_cache"], {})
 
     def test_late_identity_detail_keeps_legacy_pack_at_zero_extra_branches(self):
         alice = character("alice", "Alice")
@@ -686,9 +795,9 @@ class TestV2MasksAndApply(unittest.TestCase):
         )
         self.assertEqual(
             model.diffusion_model.blocks[0].cross_attn.context_means,
-            [100.0, 1.0],
+            [100.0, 1.0, 1.0],
         )
-        self.assertEqual(state["identity_context_cache"], {})
+        self.assertTrue(state["identity_context_cache"])
 
 
 if __name__ == "__main__":

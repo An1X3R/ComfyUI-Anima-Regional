@@ -301,7 +301,9 @@ class TestMixerProtocol(unittest.TestCase):
 
         output = wrapper.forward(x, context, transformer_options=options)
 
-        self.assertEqual(len(anchor.calls), 5)
+        # Separated routing keeps the identity branch inside one shared
+        # residual budget; no duplicate late identity evaluation is needed.
+        self.assertEqual(len(anchor.calls), 4)
         self.assertTrue(all(torch.equal(call, x) for call in anchor.calls))
         expected_q = torch.full_like(x, 9.0)
         self.assertTrue(
@@ -309,6 +311,59 @@ class TestMixerProtocol(unittest.TestCase):
         )
         self.assertTrue(all(value is options for value in anchor.options))
         self.assertEqual(output.shape, x.shape)
+
+    def test_v2_separated_route_uses_q_only_anchor_for_every_branch(self):
+        anchor = _AnchorQPatch()
+        state = _v2_runtime_state()
+        state.update(
+            {
+                "routing_contract": "separated_v1",
+                "background_conditioning": {
+                    "raw": torch.full((1, 2, 3), 5.0),
+                    "ids": None,
+                    "weights": None,
+                },
+                "background_is_final": False,
+                "layout_conditioning": {
+                    "raw": torch.full((1, 2, 3), 6.0),
+                    "ids": None,
+                    "weights": None,
+                },
+                "has_identity_conditioning": True,
+                "layout_strength": 1.0,
+                "identity_late_floor": 0.8,
+            }
+        )
+        for index, character in enumerate(state["characters"]):
+            character["pose_conditioning"] = {
+                "raw": torch.full((1, 2, 3), 10.0 + index * 10.0),
+                "ids": None,
+                "weights": None,
+            }
+            character["identity_conditioning"] = {
+                "raw": torch.full((1, 2, 3), 30.0 + index * 10.0),
+                "ids": None,
+                "weights": None,
+            }
+        wrapper = V2RegionalCrossAttention(anchor, state, 0)
+        x = torch.full((1, 8, 3), 2.0)
+        context = torch.zeros((1, 2, 3))
+        options = {"cond_or_uncond": [0], "sentinel": object()}
+
+        output = wrapper.forward(x, context, transformer_options=options)
+
+        # base + background + layout + 2 pose + 2 identity evaluations.
+        self.assertEqual(len(anchor.calls), 7)
+        self.assertTrue(all(torch.equal(call, x) for call in anchor.calls))
+        expected_q = torch.full_like(x, 9.0)
+        self.assertTrue(
+            all(torch.equal(transformed, expected_q) for transformed in anchor.transformed_q)
+        )
+        self.assertTrue(all(value is options for value in anchor.options))
+        expected = torch.tensor(
+            [[39.0, 39.0, 59.0, 59.0, 39.0, 39.0, 59.0, 59.0]]
+        ).unsqueeze(-1).expand_as(output)
+        self.assertTrue(torch.equal(output, expected))
 
     def test_plain_runtime_path_is_identity_when_disabled(self):
         state = _runtime_state()

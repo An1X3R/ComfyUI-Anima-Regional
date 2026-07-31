@@ -22,7 +22,7 @@ from ..runtime import (
     make_runtime_capture,
     validate_anima,
 )
-from .masks import build_character_masks
+from .masks import build_character_masks, build_identity_core_masks
 from .validation import _error
 
 
@@ -30,6 +30,8 @@ EXTENDED_DELTA_NORM_CAP = 4.0
 MULTI_CHARACTER_GUARDS = ("off", "soft", "strong")
 DETAIL_PRESERVE_MODES = ("off", "soft", "strong")
 IDENTITY_ANCHOR_MODES = ("off", "shared_delta")
+IDENTITY_DETAIL_MODES = ("off", "late")
+IDENTITY_DETAIL_NORM_CAP = 1.5
 
 
 def _multi_character_profile(state):
@@ -80,12 +82,36 @@ def _composition_profile(state):
 def _sampling_progress(state):
     """Return normalized sampling progress when the model exposes sigma."""
     sigma = state.get("current_sigma")
-    sigma_range = state.get("detail_sigma_range")
+    sigma_range = state.get("sampling_sigma_range") or state.get(
+        "detail_sigma_range"
+    )
     if sigma is None or not sigma_range:
         return None
     low, high = (float(sigma_range[0]), float(sigma_range[1]))
     span = max(high - low, 1e-6)
     return max(0.0, min(1.0, (high - float(sigma)) / span))
+
+
+def _identity_detail_scale(state):
+    """Fade in the optional identity-only branch during late denoising."""
+    if str(state.get("identity_detail_mode", "off")) != "late":
+        return 0.0
+    progress = _sampling_progress(state)
+    if progress is None:
+        return 0.0
+    start = max(
+        0.0,
+        min(0.95, float(state.get("identity_detail_start", 0.6))),
+    )
+    if progress <= start:
+        return 0.0
+    phase = (progress - start) / max(1.0 - start, 1e-6)
+    phase = phase * phase * (3.0 - 2.0 * phase)
+    strength = max(
+        0.0,
+        min(2.0, float(state.get("identity_detail_strength", 0.65))),
+    )
+    return strength * phase
 
 
 def _detail_preserve_scale(state):
@@ -188,6 +214,53 @@ def _v2_weights(state, x, reference, body_expand=0.0):
     return weights
 
 
+def _v2_identity_core_weights(state, x, reference):
+    """Expand body-interior identity weights to the current attention shape."""
+    temporal, grid_h, grid_w = infer_grid_shape(
+        int(x.shape[1]),
+        state.get("input_shape"),
+        patch_spatial=int(state.get("patch_spatial", 2)),
+        patch_temporal=int(state.get("patch_temporal", 1)),
+    )
+    radius = max(
+        0.05,
+        min(1.0, float(state.get("identity_core_radius", 0.55))),
+    )
+    cache_key = (
+        int(x.shape[0]),
+        int(x.shape[1]),
+        tuple(state.get("input_shape") or ()),
+        str(reference.device),
+        str(reference.dtype),
+        round(radius, 4),
+    )
+    cache = state.setdefault("identity_core_cache", {})
+    weights = cache.get(cache_key)
+    if weights is None:
+        core = build_identity_core_masks(
+            state["layout"],
+            grid_h,
+            grid_w,
+            radius,
+            reference.device,
+            reference.dtype,
+        )
+        weights = core.unsqueeze(1).unsqueeze(1).expand(
+            -1,
+            int(x.shape[0]),
+            temporal,
+            -1,
+            -1,
+        ).reshape(
+            len(core),
+            int(x.shape[0]),
+            temporal * grid_h * grid_w,
+            1,
+        )
+        cache[cache_key] = weights
+    return weights
+
+
 class V2RegionalCrossAttention:
     """Outer regional router; its inner operation may be a Q-only Anchor."""
 
@@ -208,6 +281,33 @@ class V2RegionalCrossAttention:
                 ).detach())
             self.state["context_cache"][key] = cached
         return [broadcast_context(value, int(reference_context.shape[0])) for value in cached]
+
+    def _identity_contexts(self, reference_context):
+        """Return optional stable-identity contexts, preserving character order."""
+        key = (str(reference_context.device), str(reference_context.dtype))
+        cached = self.state.setdefault("identity_context_cache", {}).get(key)
+        if cached is None:
+            cached = []
+            for character in self.state["characters"]:
+                spec = character.get("identity_conditioning")
+                if not isinstance(spec, dict):
+                    cached.append(None)
+                    continue
+                cached.append(
+                    preprocess_conditioning(
+                        self.state["diffusion_model"],
+                        spec,
+                        reference_context.device,
+                        reference_context.dtype,
+                    ).detach()
+                )
+            self.state["identity_context_cache"][key] = cached
+        return [
+            None
+            if value is None
+            else broadcast_context(value, int(reference_context.shape[0]))
+            for value in cached
+        ]
 
     def _shared_context(self, reference_context):
         spec = self.state.get("shared_conditioning")
@@ -231,6 +331,14 @@ class V2RegionalCrossAttention:
             return self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
         base = self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
         contexts = self._contexts(context)
+        identity_detail_scale = _identity_detail_scale(self.state)
+        identity_contexts = None
+        if (
+            identity_detail_scale > 0.0
+            and float(self.state.get("global_strength", 1.0)) > 0.0
+            and self.state.get("has_identity_conditioning", False)
+        ):
+            identity_contexts = self._identity_contexts(context)
         identity_anchor_mode = str(self.state.get("identity_anchor_mode", "off"))
         anchor_strength = 0.0
         if identity_anchor_mode == "shared_delta":
@@ -239,7 +347,10 @@ class V2RegionalCrossAttention:
                 min(1.0, float(self.state.get("identity_anchor_strength", 1.0))),
             )
         shared_output = base
-        if identity_anchor_mode == "shared_delta" and anchor_strength > 0.0:
+        needs_shared_output = (
+            identity_anchor_mode == "shared_delta" and anchor_strength > 0.0
+        ) or identity_contexts is not None
+        if needs_shared_output:
             if not self.state.get("shared_is_final", False):
                 shared_context = self._shared_context(context)
                 if shared_context is not None:
@@ -297,8 +408,55 @@ class V2RegionalCrossAttention:
                 detail_scale * (1.0 - anchor_strength)
                 + protected_scale * anchor_strength
             )
-        delta_total = delta_total * detail_scale
-        return base + _cap_residual_delta(delta_total, base, residual_cap)
+        main_delta = _cap_residual_delta(
+            delta_total * detail_scale,
+            base,
+            residual_cap,
+        )
+        identity_total = torch.zeros_like(base)
+        if identity_contexts is not None:
+            core_weights = _v2_identity_core_weights(self.state, x, base)
+            core_strength = max(
+                1.0,
+                min(
+                    3.0,
+                    float(self.state.get("identity_core_strength", 1.5)),
+                ),
+            )
+            for index, (character, identity_context) in enumerate(
+                zip(self.state["characters"], identity_contexts)
+            ):
+                if identity_context is None:
+                    continue
+                character_strength = float(character["strength"])
+                if character_strength == 0.0:
+                    continue
+                identity_branch = self.inner_forward(
+                    x,
+                    identity_context,
+                    rope_emb=rope_emb,
+                    transformer_options=options,
+                )
+                identity_delta = identity_branch - shared_output
+                routed_identity = _scale_extended_delta(
+                    identity_delta,
+                    base,
+                    global_strength
+                    * character_strength
+                    * identity_detail_scale,
+                )
+                core_multiplier = 1.0 + core_weights[index] * (
+                    core_strength - 1.0
+                )
+                identity_total = identity_total + (
+                    weights[index] * core_multiplier * routed_identity
+                )
+            identity_total = _cap_residual_delta(
+                identity_total,
+                base + main_delta,
+                IDENTITY_DETAIL_NORM_CAP,
+            )
+        return base + main_delta + identity_total
 
 
 class V2RegionalForwardPatch:
@@ -374,6 +532,23 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     identity_late_floor = float(options.get("identity_late_floor", 0.8))
     if not 0.0 <= identity_late_floor <= 1.0:
         raise _error("identity_late_floor must be between 0 and 1")
+    identity_detail_mode = str(options.get("identity_detail_mode", "off"))
+    if identity_detail_mode not in IDENTITY_DETAIL_MODES:
+        raise _error("identity_detail_mode must be off or late")
+    identity_detail_start = float(options.get("identity_detail_start", 0.6))
+    if not 0.0 <= identity_detail_start <= 0.95:
+        raise _error("identity_detail_start must be between 0 and 0.95")
+    identity_detail_strength = float(
+        options.get("identity_detail_strength", 0.65)
+    )
+    if not 0.0 <= identity_detail_strength <= 2.0:
+        raise _error("identity_detail_strength must be between 0 and 2")
+    identity_core_strength = float(options.get("identity_core_strength", 1.5))
+    if not 1.0 <= identity_core_strength <= 3.0:
+        raise _error("identity_core_strength must be between 1 and 3")
+    identity_core_radius = float(options.get("identity_core_radius", 0.55))
+    if not 0.05 <= identity_core_radius <= 1.0:
+        raise _error("identity_core_radius must be between 0.05 and 1")
     if (
         identity_anchor_mode == "shared_delta"
         and not isinstance(regional_pack.get("shared_conditioning"), dict)
@@ -382,18 +557,21 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
             "shared_delta identity anchoring requires a Prompt Pack with "
             "shared scene conditioning"
         )
-    detail_sigma_range = None
-    if detail_preserve_mode != "off":
+    sampling_sigma_range = None
+    if detail_preserve_mode != "off" or identity_detail_mode == "late":
         try:
             sampling = model.get_model_object("model_sampling")
             sigma_values = (
                 float(sampling.percent_to_sigma(0.0)),
                 float(sampling.percent_to_sigma(1.0)),
             )
-            detail_sigma_range = tuple(sorted(sigma_values))
+            sampling_sigma_range = tuple(sorted(sigma_values))
         except Exception:
             # Lightweight wrappers without sampling metadata remain unchanged.
-            detail_sigma_range = None
+            sampling_sigma_range = None
+    detail_sigma_range = (
+        sampling_sigma_range if detail_preserve_mode != "off" else None
+    )
     composition_sigma_range = None
     if composition_mode == "early_layout":
         try:
@@ -433,6 +611,20 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     ]
     if not characters:
         raise _error("regional pack has no active character branches")
+    has_identity_conditioning = any(
+        isinstance(character.get("identity_conditioning"), dict)
+        for character in characters
+    )
+    if (
+        identity_detail_mode == "late"
+        and identity_detail_strength > 0.0
+        and has_identity_conditioning
+        and not isinstance(regional_pack.get("shared_conditioning"), dict)
+    ):
+        raise _error(
+            "late identity detail requires a Prompt Pack with shared scene "
+            "conditioning"
+        )
 
     patched = model.clone()
     existing_patches = getattr(model, "object_patches", None) or {}
@@ -453,10 +645,17 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "detail_preserve_start": detail_preserve_start,
         "detail_preserve_amount": detail_preserve_amount,
         "detail_sigma_range": detail_sigma_range,
+        "sampling_sigma_range": sampling_sigma_range,
         "edge_focus_power": edge_focus_power,
         "identity_anchor_mode": identity_anchor_mode,
         "identity_anchor_strength": identity_anchor_strength,
         "identity_late_floor": identity_late_floor,
+        "identity_detail_mode": identity_detail_mode,
+        "identity_detail_start": identity_detail_start,
+        "identity_detail_strength": identity_detail_strength,
+        "identity_core_strength": identity_core_strength,
+        "identity_core_radius": identity_core_radius,
+        "has_identity_conditioning": has_identity_conditioning,
         "shared_conditioning": regional_pack.get("shared_conditioning"),
         "shared_is_final": bool(regional_pack.get("shared_is_final", False)),
         "patch_spatial": int(getattr(diffusion_model, "patch_spatial", 2)),
@@ -467,8 +666,10 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "input_shape": None,
         "cond_or_uncond": None,
         "context_cache": {},
+        "identity_context_cache": {},
         "shared_context_cache": {},
         "mask_cache": {},
+        "identity_core_cache": {},
         "disabled_layers": set(),
     }
     previous_wrapper = patched.model_options.get("model_function_wrapper")

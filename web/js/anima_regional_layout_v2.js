@@ -132,6 +132,8 @@ function connectedCharacters(node) {
       uuid: id,
       label: String(widgetValue(source, "label", `Character ${index}`)).trim() || `Character ${index}`,
       prompt: String(widgetValue(source, "prompt", "")),
+      identity_prompt: String(widgetValue(source, "identity_prompt", "")),
+      pose_prompt: String(widgetValue(source, "pose_prompt", "")),
       strength: clamp(widgetValue(source, "strength", 1), 0, 4),
       color: String(widgetValue(source, "color", "")).trim() || stableColor(id),
       source,
@@ -275,8 +277,8 @@ function setJson(node) {
     }
   }
   const chars = connected.length ? connected : (state.connectionsSettled ? [] : state.characters);
-  if (connected.length || state.connectionsSettled) state.characters = connected.map(({ uuid: id, label, prompt, strength, color }) => ({
-    version: 2, kind: "character", uuid: id, label, prompt, strength, color,
+  if (connected.length || state.connectionsSettled) state.characters = connected.map(({ uuid: id, label, prompt, identity_prompt, pose_prompt, strength, color }) => ({
+    version: 2, kind: "character", uuid: id, label, prompt, identity_prompt, pose_prompt, strength, color,
   }));
   const active = new Set(chars.map((item) => item.uuid));
   const authoritative = connected.length > 0 || state.connectionsSettled;
@@ -747,6 +749,7 @@ app.registerExtension({
       nodeType.prototype.onNodeCreated = function (...args) {
         const result = created?.apply(this, args);
         characterUuid(this);
+        setCharacterPromptWidgetPresentation(this);
         return result;
       };
       const draw = nodeType.prototype.onDrawForeground;
@@ -766,6 +769,33 @@ app.registerExtension({
     };
   },
 });
+
+function setCharacterPromptWidgetPresentation(node) {
+  const presentation = {
+    prompt: [
+      "legacy / extra character prompt",
+      "Old workflows can keep the full character prompt here. For the split workflow, leave it empty or use it only for extra character-local details that are neither stable identity nor pose.",
+    ],
+    identity_prompt: [
+      "identity prompt (stable traits)",
+      "Character name, hair, eyes, ears or horns, clothing, accessories, and other traits that should survive crowded scenes.",
+    ],
+    pose_prompt: [
+      "pose / interaction prompt",
+      "Position, facing direction, gesture, leaning, touching, and other action or composition instructions.",
+    ],
+    strength: [
+      "character route strength",
+      "Strength of this character's main regional branch. Identity Detail has separate controls in Advanced Options.",
+    ],
+  };
+  for (const [name, [label, tooltip]] of Object.entries(presentation)) {
+    const item = widget(node, name);
+    if (!item) continue;
+    item.label = label;
+    item.tooltip = tooltip;
+  }
+}
 
 function setPromptPackWidgetPresentation(node) {
   const presentation = {

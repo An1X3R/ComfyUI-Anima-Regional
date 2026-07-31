@@ -280,6 +280,36 @@ class TestMixerProtocol(unittest.TestCase):
         ).unsqueeze(-1).expand_as(output)
         self.assertTrue(torch.equal(output, expected))
 
+    def test_v2_late_identity_detail_keeps_q_only_anchor_as_inner_callable(self):
+        anchor = _AnchorQPatch()
+        state = _v2_runtime_state()
+        state["characters"][0]["identity_conditioning"] = {
+            "raw": torch.full((1, 2, 3), 30.0),
+            "ids": None,
+            "weights": None,
+        }
+        state["has_identity_conditioning"] = True
+        state["identity_detail_mode"] = "late"
+        state["identity_detail_start"] = 0.0
+        state["identity_detail_strength"] = 0.25
+        state["sampling_sigma_range"] = (0.0, 1.0)
+        state["current_sigma"] = 0.0
+        wrapper = V2RegionalCrossAttention(anchor, state, 0)
+        x = torch.full((1, 8, 3), 2.0)
+        context = torch.zeros((1, 2, 3))
+        options = {"cond_or_uncond": [0], "sentinel": object()}
+
+        output = wrapper.forward(x, context, transformer_options=options)
+
+        self.assertEqual(len(anchor.calls), 5)
+        self.assertTrue(all(torch.equal(call, x) for call in anchor.calls))
+        expected_q = torch.full_like(x, 9.0)
+        self.assertTrue(
+            all(torch.equal(transformed, expected_q) for transformed in anchor.transformed_q)
+        )
+        self.assertTrue(all(value is options for value in anchor.options))
+        self.assertEqual(output.shape, x.shape)
+
     def test_plain_runtime_path_is_identity_when_disabled(self):
         state = _runtime_state()
         state["enabled"] = False

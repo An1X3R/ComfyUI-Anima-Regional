@@ -128,6 +128,49 @@ def build_character_masks(
     return raw_stack, effective
 
 
+def build_identity_core_masks(
+    layout,
+    height: int,
+    width: int,
+    radius: float,
+    device=None,
+    dtype=torch.float32,
+):
+    """Return smooth body-interior weights without changing ownership.
+
+    ``radius`` is the central fraction of each Body box that receives a
+    non-zero core weight. Ownership Hints are intentionally excluded so small
+    contact boxes keep the normal soft regional blend.
+    """
+    device = device or torch.device("cpu")
+    radius = max(0.05, min(1.0, float(radius)))
+    x = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) / width
+    y = (torch.arange(height, device=device, dtype=torch.float32) + 0.5) / height
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    cores = {
+        item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype)
+        for item in layout["characters"]
+    }
+    threshold = 1.0 - radius
+    for region in layout["regions"]:
+        if not region["enabled"] or region["type"] != "body_region":
+            continue
+        half_width = max(float(region["width"]) * 0.5, 1e-6)
+        half_height = max(float(region["height"]) * 0.5, 1e-6)
+        center_x = float(region["x"]) + half_width
+        center_y = float(region["y"]) + half_height
+        distance = torch.maximum(
+            (xx - center_x).abs() / half_width,
+            (yy - center_y).abs() / half_height,
+        )
+        edge_depth = (1.0 - distance).clamp(0.0, 1.0)
+        core = ((edge_depth - threshold) / radius).clamp(0.0, 1.0)
+        core = core * core * (3.0 - 2.0 * core)
+        key = region["character_uuid"]
+        cores[key] = torch.maximum(cores[key], core.to(dtype=dtype))
+    return torch.stack([cores[item["uuid"]] for item in layout["characters"]])
+
+
 def render_inspection(layout, boundary_falloff: int = 0):
     height, width = layout["height"], layout["width"]
     _, effective = build_character_masks(

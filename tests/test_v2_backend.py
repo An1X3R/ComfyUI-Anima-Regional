@@ -145,6 +145,49 @@ class TestV2DataContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 0 and 4"):
             node.build("Alice", "prompt", 4.1, "", unique_id="42")
 
+    def test_split_identity_and_pose_prompts_are_optional_and_stable(self):
+        node = AnimaRegionalCharacterPromptV2()
+        payload = node.build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes, white coat",
+            "reaching toward the right",
+        )[0]
+        self.assertEqual(payload["prompt"], "")
+        self.assertEqual(payload["identity_prompt"], "brown hair, blue eyes, white coat")
+        self.assertEqual(payload["pose_prompt"], "reaching toward the right")
+
+    def test_prompt_pack_keeps_legacy_encoding_and_adds_identity_only_when_present(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes",
+            "reaching toward the right",
+        )[0]
+        clip = FakeClip()
+        pack = AnimaRegionalPromptPackV2().pack(
+            clip,
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "shared scene",
+            "negative",
+        )[0]
+        self.assertEqual(
+            clip.encoded,
+            [
+                "shared scene",
+                "negative",
+                "brown hair, blue eyes\nreaching toward the right\nshared scene",
+                "brown hair, blue eyes\nshared scene",
+            ],
+        )
+        self.assertIn("identity_conditioning", pack["characters"][0])
+
     def test_reordered_character_inputs_preserve_uuid_bindings(self):
         alice, bob = character("alice", "Alice"), character("bob", "Bob")
         editor = {
@@ -554,6 +597,98 @@ class TestV2MasksAndApply(unittest.TestCase):
             transformer_options={"cond_or_uncond": [0]},
         )
         self.assertTrue(torch.allclose(output, torch.full_like(output, 102.4)))
+
+    def test_late_identity_detail_uses_shared_delta_and_core_only_inside_body(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes, white coat",
+            "reaching toward the right",
+        )[0]
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "global",
+            "",
+            conditioning(100.0),
+        )[0]
+        pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
+        pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
+        pack["characters"][0]["identity_conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 15.0
+        )
+        model = FakeModel()
+        patched, _, _, _ = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "replace",
+            {
+                "identity_detail_mode": "late",
+                "identity_detail_start": 0.5,
+                "identity_detail_strength": 1.0,
+                "identity_core_strength": 1.5,
+                "identity_core_radius": 0.55,
+            },
+        )
+        patch = patched.object_patches["diffusion_model.blocks.0.cross_attn.forward"]
+        state = patch.router.state
+        state["input_shape"] = (1, 4, 4, 8)
+        state["sampling_sigma_range"] = (0.0, 1.0)
+        state["current_sigma"] = 0.0
+        output = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [100.0, 10.0, 13.0, 15.0],
+        )
+        self.assertTrue(torch.all(output >= 13.0))
+        self.assertGreater(float(output.max()), 13.0)
+        self.assertTrue(state["identity_context_cache"])
+        self.assertTrue(state["identity_core_cache"])
+
+    def test_late_identity_detail_keeps_legacy_pack_at_zero_extra_branches(self):
+        alice = character("alice", "Alice")
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "global",
+            "",
+            conditioning(100.0),
+        )[0]
+        model = FakeModel()
+        patched, _, _, _ = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "replace",
+            {
+                "identity_detail_mode": "late",
+                "identity_detail_start": 0.5,
+                "identity_detail_strength": 1.0,
+            },
+        )
+        patch = patched.object_patches["diffusion_model.blocks.0.cross_attn.forward"]
+        state = patch.router.state
+        state["input_shape"] = (1, 4, 4, 8)
+        state["sampling_sigma_range"] = (0.0, 1.0)
+        state["current_sigma"] = 0.0
+        patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [100.0, 1.0],
+        )
+        self.assertEqual(state["identity_context_cache"], {})
 
 
 if __name__ == "__main__":

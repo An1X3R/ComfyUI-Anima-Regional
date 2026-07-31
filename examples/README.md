@@ -20,3 +20,8 @@ Adjust the CLIP, UNET, and VAE filenames to match your installation.
 The example deliberately keeps framing and action in the Shared Scene Prompt,
 while character identity, ears, hair, eyes, clothing, and accessories remain in
 their individual Character Prompt nodes.
+
+With the 0.3.4 development build, those individual prompts can be split into
+`identity prompt (stable traits)` and `pose / interaction prompt`. The checked-in
+0.3.3 workflow remains valid; its legacy `prompt` fields continue to work and
+the new fields default to empty.

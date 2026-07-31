@@ -68,6 +68,8 @@ def make_character_payload(
     strength: Any = 1.0,
     color: Any = "",
     character_uuid: Any = "",
+    identity_prompt: Any = "",
+    pose_prompt: Any = "",
 ) -> dict[str, Any]:
     """Create a contract-shaped character; supplied IDs remain stable."""
     if character_uuid is not None and not isinstance(character_uuid, str):
@@ -82,6 +84,8 @@ def make_character_payload(
         "label": label,
         "prompt": prompt,
         "strength": strength,
+        "identity_prompt": identity_prompt,
+        "pose_prompt": pose_prompt,
     }
     if color is not None and str(color).strip():
         payload["color"] = color
@@ -104,12 +108,29 @@ def validate_character(payload: Any) -> dict[str, Any]:
         raise _error("character payload must be an object")
     if payload.get("version") != 2 or payload.get("kind") != "character":
         raise _error("invalid ANIMA_REGIONAL_CHARACTER_V2 payload")
+    prompt = _text(payload.get("prompt", ""), "character prompt", required=False)
+    identity_prompt = _text(
+        payload.get("identity_prompt", ""),
+        "character identity_prompt",
+        required=False,
+    )
+    pose_prompt = _text(
+        payload.get("pose_prompt", ""),
+        "character pose_prompt",
+        required=False,
+    )
+    if not prompt and not identity_prompt and not pose_prompt:
+        raise _error(
+            "character requires prompt, identity_prompt, or pose_prompt"
+        )
     result: dict[str, Any] = {
         "version": 2,
         "kind": "character",
         "uuid": _stable_id(payload.get("uuid"), "character uuid"),
         "label": _text(payload.get("label"), "character label", limit=256),
-        "prompt": _text(payload.get("prompt"), "character prompt"),
+        "prompt": prompt,
+        "identity_prompt": identity_prompt,
+        "pose_prompt": pose_prompt,
         "strength": _number(payload.get("strength"), "character strength"),
     }
     if not 0.0 <= result["strength"] <= 4.0:

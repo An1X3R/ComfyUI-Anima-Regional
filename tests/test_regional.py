@@ -29,10 +29,12 @@ from anima_regional.v2.runtime import (
     _cap_residual_delta,
     _composition_profile,
     _detail_preserve_scale,
+    _identity_detail_scale,
     _multi_character_profile,
     _scale_extended_delta,
     _shape_region_weights,
 )
+from anima_regional.v2.masks import build_identity_core_masks
 
 
 def _box(prompt, center_x, priority=0):
@@ -429,6 +431,14 @@ class TestNodes(unittest.TestCase):
         self.assertIn("identity_anchor_strength", options["optional"])
         self.assertIn("identity_late_floor", options["optional"])
         self.assertEqual(
+            options["optional"]["identity_detail_mode"][0],
+            ["off", "late"],
+        )
+        self.assertIn("identity_detail_start", options["optional"])
+        self.assertIn("identity_detail_strength", options["optional"])
+        self.assertIn("identity_core_strength", options["optional"])
+        self.assertIn("identity_core_radius", options["optional"])
+        self.assertEqual(
             list(preview["optional"]),
             ["selected_region", "boundary_falloff"],
         )
@@ -472,6 +482,16 @@ class TestNodes(unittest.TestCase):
         self.assertEqual(protected["identity_anchor_mode"], "shared_delta")
         self.assertEqual(protected["identity_anchor_strength"], 0.9)
         self.assertEqual(protected["identity_late_floor"], 0.75)
+        identity = AnimaRegionalOptions().build(
+            "exclusive", "replace", "off", 1.0, 0, -1, 0.0, 1.0, 2, 8, -1,
+            4096, 0, "off", 1.0, 0.04, 0.55, "soft", "soft", 0.65,
+            0.5, 1.5, "shared_delta", 0.9, 0.75, "late", 0.55, 0.8, 1.75, 0.5,
+        )[0]
+        self.assertEqual(identity["identity_detail_mode"], "late")
+        self.assertEqual(identity["identity_detail_start"], 0.55)
+        self.assertEqual(identity["identity_detail_strength"], 0.8)
+        self.assertEqual(identity["identity_core_strength"], 1.75)
+        self.assertEqual(identity["identity_core_radius"], 0.5)
         with self.assertRaisesRegex(ValueError, "identity_anchor_mode"):
             AnimaRegionalOptions().build(
                 "exclusive", "replace", "off", 1.0, 0, -1, 0.0, 1.0, 2, 8,
@@ -489,6 +509,12 @@ class TestNodes(unittest.TestCase):
                 "exclusive", "replace", "off", 1.0, 0, -1, 0.0, 1.0, 2, 8,
                 -1, 4096, 0, "off", 1.0, 0.04, 0.55, "off", "off", 0.65,
                 0.5, 1.0, "shared_delta", 1.0, -0.1,
+            )
+        with self.assertRaisesRegex(ValueError, "identity_detail_mode"):
+            AnimaRegionalOptions().build(
+                "exclusive", "replace", "off", 1.0, 0, -1, 0.0, 1.0, 2, 8,
+                -1, 4096, 0, "off", 1.0, 0.04, 0.55, "off", "off", 0.65,
+                0.5, 1.0, "off", 1.0, 0.8, "invalid",
             )
 
     def test_early_layout_profile_enhances_only_the_early_phase(self):
@@ -559,6 +585,55 @@ class TestNodes(unittest.TestCase):
             "current_sigma": 0.0,
         }
         self.assertEqual(_detail_preserve_scale(state), 1.0)
+
+    def test_identity_detail_schedule_is_zero_before_start_and_full_at_end(self):
+        state = {
+            "identity_detail_mode": "late",
+            "identity_detail_start": 0.6,
+            "identity_detail_strength": 0.8,
+            "sampling_sigma_range": (0.0, 1.0),
+            "current_sigma": 0.8,
+        }
+        self.assertEqual(_identity_detail_scale(state), 0.0)
+        state["current_sigma"] = 0.0
+        self.assertAlmostEqual(_identity_detail_scale(state), 0.8)
+        state["identity_detail_mode"] = "off"
+        self.assertEqual(_identity_detail_scale(state), 0.0)
+
+    def test_identity_core_weights_peak_in_body_center_and_ignore_hints(self):
+        layout = {
+            "characters": [{"uuid": "alice"}],
+            "regions": [
+                {
+                    "character_uuid": "alice",
+                    "type": "body_region",
+                    "x": 0.2,
+                    "y": 0.2,
+                    "width": 0.6,
+                    "height": 0.6,
+                    "enabled": True,
+                },
+                {
+                    "character_uuid": "alice",
+                    "type": "ownership_hint",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 0.2,
+                    "height": 0.2,
+                    "enabled": True,
+                },
+            ],
+        }
+        core = build_identity_core_masks(
+            layout,
+            10,
+            10,
+            0.5,
+            torch.device("cpu"),
+            torch.float32,
+        )[0]
+        self.assertGreater(float(core[5, 5]), float(core[2, 2]))
+        self.assertEqual(float(core[0, 0]), 0.0)
 
     def test_edge_focus_reduces_only_soft_weights(self):
         weights = torch.tensor([0.0, 0.25, 0.5, 1.0])

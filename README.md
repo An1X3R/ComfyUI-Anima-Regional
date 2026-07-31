@@ -1,4 +1,4 @@
-# ComfyUI Anima Regional Prompt 0.3.3
+# ComfyUI Anima Regional Prompt 0.3.4
 
 Training-free character-level regional prompting for Anima. The plugin keeps
 character prompts in separate attention branches and routes each branch with an
@@ -53,11 +53,40 @@ and accessories in that character's own prompt. Do not place character identity
 or clothing for all subjects in the shared prompt: shared terms are deliberately
 subtracted by the identity anchor.
 
+## 0.3.4 identity core (development)
+
+Character Prompt now has two optional fields for crowded scenes:
+
+- `identity prompt (stable traits)`: name, hair, eyes, ears or horns, clothing,
+  and accessories that should remain attached to that character.
+- `pose / interaction prompt`: position, facing, gesture, leaning, touching, and
+  other action or composition terms.
+
+The original `prompt` field remains compatible with 0.3.3 workflows. If either
+new field is filled, the main regional branch combines the split fields and the
+old field; the old field can be left empty or used for extra character-local
+details. If both new fields are empty, the old path is unchanged and no
+identity-only branch is evaluated.
+
+The optional `identity_detail_mode=late` adds a second, clean identity residual
+only during late denoising. It compares `identity prompt + shared scene` with
+the shared scene, so it does not rewrite the whole pose branch. The residual is
+strongest in the interior of Body boxes and is multiplied by the existing
+ownership mask; it never expands ownership and it ignores Ownership Hints for
+the core boost. This is intended for four-plus characters standing close
+together, not as a hard segmentation guarantee.
+
+The late branch costs one shared attention call plus one identity call per
+character only after `identity_detail_start`. Legacy prompts or
+`identity_detail_mode=off` add zero extra attention calls.
+
 ## V2 workflow
 
 Use the nodes in `Anima/Regional`:
 
-1. Create one `Anima Regional - Character Prompt` per character.
+1. Create one `Anima Regional - Character Prompt` per character. For the
+   crowded-scene route, put stable traits in `identity prompt` and actions in
+   `pose / interaction prompt`; leave the legacy prompt empty unless needed.
 2. Connect them to `Anima Regional - Layout`. Draw Body regions and optional
    Ownership Hints directly on its canvas.
 3. Enter the shared scene description once in `Anima Regional - Shared Scene Prompt`.
@@ -151,6 +180,13 @@ the legacy full Cross-Attn Mixer with Regional.
   shared-scene-subtracted delta at 1
 - `identity_late_floor`: minimum late identity influence while
   `detail_preserve_mode` is fading the regional route
+- `identity_detail_mode`: `off` or `late`; enables the optional late identity
+  residual when split identity prompts exist
+- `identity_detail_start`: normalized denoising progress at which that residual
+  begins to fade in
+- `identity_detail_strength`: overall strength of the late identity residual
+- `identity_core_strength`: extra multiplier at the center of Body boxes
+- `identity_core_radius`: fraction of each Body box treated as its central core
 
 Layout owns `overlap_mode`, and Apply owns `blend_mode`; their duplicate values
 inside the compatibility Options payload do not override V2. Legacy strict
@@ -195,6 +231,14 @@ the feature falls back to the unchanged route instead of guessing.
 extra shared attention call. A value of `1` uses only the character-minus-shared
 residual. Intermediate values blend the two routes and introduce the late
 identity floor gradually.
+
+For the new identity detail route, start with `late`, `start=0.6`,
+`strength=0.65`, `core_strength=1.5`, and `core_radius=0.55`. If the model
+wrapper does not expose sampling sigma, the route stays off rather than running
+at every step. The added branch is deliberately capped relative to the base
+attention output; increasing the control can improve clothing retention, but
+it cannot turn the feature into a hard mask or prevent all self-attention
+communication.
 
 `edge_focus_power=1.0` is unchanged behavior. Values around `1.3` to `1.6`
 attenuate only fractional mask weights, keeping fully owned interiors at full

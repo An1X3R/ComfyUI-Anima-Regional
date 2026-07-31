@@ -38,6 +38,21 @@ def _validate_pack(pack):
             value = spec.get(name)
             if value is not None and not torch.is_tensor(value):
                 raise _error(f"prompt pack character conditioning {name} must be a tensor")
+        identity_spec = entry.get("identity_conditioning")
+        if identity_spec is not None:
+            if not isinstance(identity_spec, dict) or not torch.is_tensor(
+                identity_spec.get("raw")
+            ):
+                raise _error(
+                    "prompt pack character identity conditioning has no tensor embedding"
+                )
+            for name in ("ids", "weights"):
+                value = identity_spec.get(name)
+                if value is not None and not torch.is_tensor(value):
+                    raise _error(
+                        f"prompt pack character identity conditioning {name} "
+                        "must be a tensor"
+                    )
         actual.append(entry.get("uuid"))
     if actual != expected or len(set(actual)) != len(actual):
         raise _error("prompt pack character UUID mapping is invalid")
@@ -77,6 +92,8 @@ class AnimaRegionalCharacterPromptV2:
             "optional": {
                 # The frontend owns this stable value and passes it back on reload.
                 "character_uuid": ("STRING", {"default": ""}),
+                "identity_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "pose_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -86,10 +103,30 @@ class AnimaRegionalCharacterPromptV2:
     FUNCTION = "build"
     CATEGORY = "Anima/Regional"
 
-    def build(self, label, prompt, strength, color, character_uuid="", unique_id=None):
+    def build(
+        self,
+        label,
+        prompt,
+        strength,
+        color,
+        character_uuid="",
+        identity_prompt="",
+        pose_prompt="",
+        unique_id=None,
+    ):
         if not str(character_uuid or "").strip() and unique_id is not None:
             character_uuid = character_id_from_unique_id(unique_id)
-        return (make_character_payload(label, prompt, strength, color, character_uuid),)
+        return (
+            make_character_payload(
+                label,
+                prompt,
+                strength,
+                color,
+                character_uuid,
+                identity_prompt,
+                pose_prompt,
+            ),
+        )
 
 
 class AnimaRegionalLayoutV2:
@@ -152,14 +189,38 @@ class AnimaRegionalPromptPackV2:
         # Iterate characters, never regions: a UUID is encoded exactly once.
         characters = []
         for character in layout["characters"]:
-            text = f"{character['prompt']}\n{global_text}"
+            identity_text = character.get("identity_prompt", "")
+            pose_text = character.get("pose_prompt", "")
+            split_prompt = bool(identity_text or pose_text)
+            character_parts = (
+                [identity_text, pose_text, character["prompt"]]
+                if split_prompt
+                else [character["prompt"]]
+            )
+            text = "\n".join(
+                value for value in [*character_parts, global_text] if value
+            )
             conditioning = encode_prompt(clip, text, f"character {character['label']}")
-            characters.append({
+            entry = {
                 "uuid": character["uuid"],
                 "label": character["label"],
                 "strength": character["strength"],
                 "conditioning": extract_conditioning(conditioning, f"character {character['label']}"),
-            })
+            }
+            if identity_text:
+                identity_full_text = "\n".join(
+                    value for value in [identity_text, global_text] if value
+                )
+                identity_conditioning = encode_prompt(
+                    clip,
+                    identity_full_text,
+                    f"character {character['label']} identity",
+                )
+                entry["identity_conditioning"] = extract_conditioning(
+                    identity_conditioning,
+                    f"character {character['label']} identity",
+                )
+            characters.append(entry)
         return ({
             "version": 2,
             "layout": copy.deepcopy(layout),
@@ -258,6 +319,7 @@ class AnimaRegionalApplyV2:
         multi_character_guard = str(options.get("multi_character_guard", "off"))
         detail_preserve_mode = str(options.get("detail_preserve_mode", "off"))
         identity_anchor_mode = str(options.get("identity_anchor_mode", "off"))
+        identity_detail_mode = str(options.get("identity_detail_mode", "off"))
         composition_text = f", composition={composition_mode}"
         if composition_mode == "early_layout":
             composition_text += (
@@ -268,6 +330,7 @@ class AnimaRegionalApplyV2:
         composition_text += f", multi_guard={multi_character_guard}"
         composition_text += f", detail={detail_preserve_mode}"
         composition_text += f", identity_anchor={identity_anchor_mode}"
+        composition_text += f", identity_detail={identity_detail_mode}"
         return (
             patched,
             positive,

@@ -283,6 +283,26 @@ class AnimaRegionalOptions:
                     "FLOAT",
                     {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05},
                 ),
+                "identity_detail_mode": (
+                    ["off", "late"],
+                    {"default": "off"},
+                ),
+                "identity_detail_start": (
+                    "FLOAT",
+                    {"default": 0.6, "min": 0.0, "max": 0.95, "step": 0.05},
+                ),
+                "identity_detail_strength": (
+                    "FLOAT",
+                    {"default": 0.65, "min": 0.0, "max": 2.0, "step": 0.05},
+                ),
+                "identity_core_strength": (
+                    "FLOAT",
+                    {"default": 1.5, "min": 1.0, "max": 3.0, "step": 0.05},
+                ),
+                "identity_core_radius": (
+                    "FLOAT",
+                    {"default": 0.55, "min": 0.05, "max": 1.0, "step": 0.05},
+                ),
             },
         }
 
@@ -318,6 +338,11 @@ class AnimaRegionalOptions:
         identity_anchor_mode="off",
         identity_anchor_strength=1.0,
         identity_late_floor=0.8,
+        identity_detail_mode="off",
+        identity_detail_start=0.6,
+        identity_detail_strength=0.65,
+        identity_core_strength=1.5,
+        identity_core_radius=0.55,
     ):
         if float(start_percent) > float(end_percent):
             raise ValueError("[AnimaRegional] start_percent must not exceed end_percent")
@@ -381,6 +406,31 @@ class AnimaRegionalOptions:
             raise ValueError(
                 "[AnimaRegional] identity_late_floor must be between 0 and 1"
             )
+        identity_detail_mode = str(identity_detail_mode)
+        if identity_detail_mode not in ("off", "late"):
+            raise ValueError(
+                "[AnimaRegional] identity_detail_mode must be off or late"
+            )
+        identity_detail_start = float(identity_detail_start)
+        if not 0.0 <= identity_detail_start <= 0.95:
+            raise ValueError(
+                "[AnimaRegional] identity_detail_start must be between 0 and 0.95"
+            )
+        identity_detail_strength = float(identity_detail_strength)
+        if not 0.0 <= identity_detail_strength <= 2.0:
+            raise ValueError(
+                "[AnimaRegional] identity_detail_strength must be between 0 and 2"
+            )
+        identity_core_strength = float(identity_core_strength)
+        if not 1.0 <= identity_core_strength <= 3.0:
+            raise ValueError(
+                "[AnimaRegional] identity_core_strength must be between 1 and 3"
+            )
+        identity_core_radius = float(identity_core_radius)
+        if not 0.05 <= identity_core_radius <= 1.0:
+            raise ValueError(
+                "[AnimaRegional] identity_core_radius must be between 0.05 and 1"
+            )
         return (
             {
                 "overlap_mode": str(overlap_mode),
@@ -408,6 +458,11 @@ class AnimaRegionalOptions:
                 "identity_anchor_mode": identity_anchor_mode,
                 "identity_anchor_strength": identity_anchor_strength,
                 "identity_late_floor": identity_late_floor,
+                "identity_detail_mode": identity_detail_mode,
+                "identity_detail_start": identity_detail_start,
+                "identity_detail_strength": identity_detail_strength,
+                "identity_core_strength": identity_core_strength,
+                "identity_core_radius": identity_core_radius,
             },
         )
 

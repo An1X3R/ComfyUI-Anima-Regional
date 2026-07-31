@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-anima-regional"
+version = "0.3.3"
+description = "Training-free regional prompt routing for the Anima diffusion model in ComfyUI"
+requires-python = ">=3.10"
+
+[tool.comfy]
+PublisherId = "local-prototype"
+DisplayName = "Anima Regional Prompt"
+Icon = ""
+
+[project.urls]
+Repository = "https://github.com/An1X3R/ComfyUI-Anima-Regional"
+Issues = "https://github.com/An1X3R/ComfyUI-Anima-Regional/issues"

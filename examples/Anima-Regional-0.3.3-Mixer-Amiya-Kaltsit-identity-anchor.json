@@ -1,0 +1,1653 @@
+{
+  "id": "anima-regional-v2-amiya-kaltsit",
+  "revision": 0,
+  "last_node_id": 20,
+  "last_link_id": 29,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CLIPLoader",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        },
+        {
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3,
+            23
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen_3_06b_base.safetensors",
+        "stable_diffusion",
+        "default"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        60
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "anima-base-v1.0.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        500
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "qwen_image_vae.safetensors"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "AnimaRegionalCharacterPromptV2",
+      "pos": [
+        380,
+        50
+      ],
+      "size": [
+        360,
+        240
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "label",
+          "type": "STRING",
+          "widget": {
+            "name": "label"
+          },
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength"
+          },
+          "link": null
+        },
+        {
+          "name": "color",
+          "type": "STRING",
+          "widget": {
+            "name": "color"
+          },
+          "link": null
+        },
+        {
+          "name": "character_uuid",
+          "type": "STRING",
+          "widget": {
+            "name": "character_uuid"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "character",
+          "type": "ANIMA_REGIONAL_CHARACTER_V2",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalCharacterPromptV2"
+      },
+      "widgets_values": [
+        "Amiya",
+        "Amiya, Arknights, young female Cautus operator, long brown rabbit ears, brown hair, blue eyes, black and white Rhodes Island uniform, blue tie, black tights, left side of the image, extending her right hand across the center, upper body leaning toward the right",
+        1,
+        "#35A7D8",
+        "character-node-4"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "AnimaRegionalCharacterPromptV2",
+      "pos": [
+        380,
+        340
+      ],
+      "size": [
+        360,
+        240
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "label",
+          "type": "STRING",
+          "widget": {
+            "name": "label"
+          },
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength"
+          },
+          "link": null
+        },
+        {
+          "name": "color",
+          "type": "STRING",
+          "widget": {
+            "name": "color"
+          },
+          "link": null
+        },
+        {
+          "name": "character_uuid",
+          "type": "STRING",
+          "widget": {
+            "name": "character_uuid"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "character",
+          "type": "ANIMA_REGIONAL_CHARACTER_V2",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalCharacterPromptV2"
+      },
+      "widgets_values": [
+        "Kal'tsit",
+        "Kal'tsit, Arknights, mature female Feline doctor, green hair, green eyes, white cat ears, long white coat, black and green medical outfit, right side of the image, extending her left hand across the center, upper body leaning toward the left",
+        1,
+        "#E9A43A",
+        "character-node-5"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "AnimaRegionalLayoutV2",
+      "pos": [
+        820,
+        60
+      ],
+      "size": [
+        500,
+        610
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "name": "overlap_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "overlap_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "layout_json",
+          "type": "STRING",
+          "widget": {
+            "name": "layout_json"
+          },
+          "link": null
+        },
+        {
+          "name": "character_1",
+          "type": "ANIMA_REGIONAL_CHARACTER_V2",
+          "link": 5
+        },
+        {
+          "name": "character_2",
+          "type": "ANIMA_REGIONAL_CHARACTER_V2",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layout",
+          "type": "ANIMA_REGIONAL_LAYOUT_V2",
+          "links": [
+            4,
+            18,
+            19
+          ]
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalLayoutV2"
+      },
+      "widgets_values": [
+        896,
+        1320,
+        "exclusive",
+        "{\"version\":2,\"width\":896,\"height\":1320,\"overlap_mode\":\"exclusive\",\"characters\":[{\"version\":2,\"kind\":\"character\",\"uuid\":\"character-node-4\",\"label\":\"Amiya\",\"prompt\":\"Amiya, Arknights, young female Cautus operator, long brown rabbit ears, brown hair, blue eyes, black and white Rhodes Island uniform, blue tie, black tights, left side of the image, extending her right hand across the center, upper body leaning toward the right\",\"strength\":1,\"color\":\"#35A7D8\"},{\"version\":2,\"kind\":\"character\",\"uuid\":\"character-node-5\",\"label\":\"Kal'tsit\",\"prompt\":\"Kal'tsit, Arknights, mature female Feline doctor, green hair, green eyes, white cat ears, long white coat, black and green medical outfit, right side of the image, extending her left hand across the center, upper body leaning toward the left\",\"strength\":1,\"color\":\"#E9A43A\"}],\"regions\":[{\"uuid\":\"amiya-body\",\"character_uuid\":\"character-node-4\",\"type\":\"body_region\",\"geometry\":\"box\",\"x\":0.02,\"y\":0.08,\"width\":0.58,\"height\":0.84,\"feather\":0.02,\"enabled\":true},{\"uuid\":\"kaltsit-body\",\"character_uuid\":\"character-node-5\",\"type\":\"body_region\",\"geometry\":\"box\",\"x\":0.4,\"y\":0.08,\"width\":0.58,\"height\":0.84,\"feather\":0.02,\"enabled\":true},{\"uuid\":\"amiya-hand-hint\",\"character_uuid\":\"character-node-4\",\"type\":\"ownership_hint\",\"geometry\":\"box\",\"x\":0.48,\"y\":0.32,\"width\":0.13,\"height\":0.2,\"feather\":0.01,\"enabled\":true},{\"uuid\":\"kaltsit-hand-hint\",\"character_uuid\":\"character-node-5\",\"type\":\"ownership_hint\",\"geometry\":\"box\",\"x\":0.39,\"y\":0.32,\"width\":0.13,\"height\":0.2,\"feather\":0.01,\"enabled\":true}]}"
+      ]
+    },
+    {
+      "id": 7,
+      "type": "AnimaRegionalPromptPackV2",
+      "pos": [
+        1400,
+        80
+      ],
+      "size": [
+        420,
+        330
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        },
+        {
+          "name": "layout",
+          "type": "ANIMA_REGIONAL_LAYOUT_V2",
+          "link": 4
+        },
+        {
+          "name": "global_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "global_prompt"
+          },
+          "link": 29
+        },
+        {
+          "name": "negative_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "negative_prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "base_positive",
+          "type": "CONDITIONING",
+          "link": 26
+        },
+        {
+          "name": "base_negative",
+          "type": "CONDITIONING",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "regional_pack",
+          "type": "ANIMA_REGIONAL_PACK_V2",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalPromptPackV2"
+      },
+      "widgets_values": [
+        "masterpiece, best quality, anime illustration, upper body, two distinct women, one on the left and one on the right, facing each other, each gently reaching across the center to touch the other's hand, natural connected arms, both upper bodies leaning into the other side, coherent pose, clean silhouette, consistent lighting, detailed clothing",
+        "head out of frame,bad hand,extra toes,low resolution,worst quality, low quality,lowres,jpeg,bad composition,artifacts,bad proportions,error,inaccurate limb,bad anatomy,bad feet,ugly,terrible,extra fingers,fewer fingers,missing fingers,extra arms,extra legs,extra digit,fewer digits,trademark,artist's name,username,watermark,signature,multiple views,weapon,eye out of frame,shiny skin"
+      ]
+    },
+    {
+      "id": 8,
+      "type": "AnimaRegionalOptions",
+      "pos": [
+        840,
+        730
+      ],
+      "size": [
+        360,
+        500
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "options",
+          "type": "ANIMA_REGIONAL_OPTIONS",
+          "links": [
+            10,
+            19
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalOptions"
+      },
+      "widgets_values": [
+        "exclusive",
+        "base_preserve",
+        "off",
+        1,
+        0,
+        -1,
+        0,
+        1,
+        2,
+        8,
+        -1,
+        4096,
+        0,
+        "off",
+        1,
+        0.04,
+        0.55,
+        "off",
+        "soft",
+        0.65,
+        0.5,
+        1,
+        "shared_delta",
+        1,
+        0.8
+      ]
+    },
+    {
+      "id": 9,
+      "type": "AnimaRegionalApplyV2",
+      "pos": [
+        1900,
+        100
+      ],
+      "size": [
+        330,
+        180
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 25
+        },
+        {
+          "name": "regional_pack",
+          "type": "ANIMA_REGIONAL_PACK_V2",
+          "link": 9
+        },
+        {
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "name": "blend_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "blend_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "advanced_options",
+          "type": "ANIMA_REGIONAL_OPTIONS",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            12
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            13
+          ]
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalApplyV2"
+      },
+      "widgets_values": [
+        true,
+        "base_preserve"
+      ]
+    },
+    {
+      "id": 10,
+      "type": "EmptyLatentImage",
+      "pos": [
+        1400,
+        520
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": 7
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": 8
+        },
+        {
+          "name": "batch_size",
+          "type": "INT",
+          "widget": {
+            "name": "batch_size"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            14
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        896,
+        1320,
+        1
+      ]
+    },
+    {
+      "id": 11,
+      "type": "AnimaFlowCorrectiveSampler",
+      "pos": [
+        2320,
+        100
+      ],
+      "size": [
+        330,
+        586
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 11
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 12
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 13
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 14
+        },
+        {
+          "name": "flow_settings",
+          "type": "ANIMA_FLOW_SETTINGS",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": null
+        },
+        {
+          "name": "cfg_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "cfg_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "flow_solver",
+          "type": "COMBO",
+          "widget": {
+            "name": "flow_solver"
+          },
+          "link": null
+        },
+        {
+          "name": "flow_schedule",
+          "type": "COMBO",
+          "widget": {
+            "name": "flow_schedule"
+          },
+          "link": null
+        },
+        {
+          "name": "flow_shift",
+          "type": "FLOAT",
+          "widget": {
+            "name": "flow_shift"
+          },
+          "link": null
+        },
+        {
+          "name": "denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "denoise"
+          },
+          "link": null
+        },
+        {
+          "name": "add_noise",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "add_noise"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            15
+          ]
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "log",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaFlowCorrectiveSampler"
+      },
+      "widgets_values": [
+        118653025649008,
+        "randomize",
+        28,
+        5,
+        "const",
+        "flow_euler",
+        "flow_cosmos_rho7",
+        3,
+        1,
+        true
+      ]
+    },
+    {
+      "id": 12,
+      "type": "VAEDecode",
+      "pos": [
+        2720,
+        140
+      ],
+      "size": [
+        210,
+        58
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 15
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 13,
+      "type": "SaveImage",
+      "pos": [
+        3050,
+        140
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 17
+        },
+        {
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "AnimaRegional/0.3.3-Amiya-Kaltsit-IdentityAnchor"
+      ]
+    },
+    {
+      "id": 14,
+      "type": "AnimaRegionalInspectV2",
+      "pos": [
+        1400,
+        820
+      ],
+      "size": [
+        360,
+        180
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "layout",
+          "type": "ANIMA_REGIONAL_LAYOUT_V2",
+          "link": 18
+        },
+        {
+          "name": "advanced_options",
+          "type": "ANIMA_REGIONAL_OPTIONS",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ownership_preview",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "region_masks",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "box_masks_image",
+          "type": "IMAGE",
+          "links": [
+            20
+          ]
+        },
+        {
+          "name": "effective_masks_image",
+          "type": "IMAGE",
+          "links": [
+            21
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalInspectV2"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 15,
+      "type": "PreviewImage",
+      "pos": [
+        1830,
+        820
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 20
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 16,
+      "type": "PreviewImage",
+      "pos": [
+        2150,
+        820
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 17,
+      "type": "AnimaArtistPack",
+      "pos": [
+        360,
+        -250
+      ],
+      "size": [
+        360,
+        230
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 23
+        },
+        {
+          "name": "artist_chain",
+          "type": "STRING",
+          "widget": {
+            "name": "artist_chain"
+          },
+          "link": null
+        },
+        {
+          "name": "base_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "base_prompt"
+          },
+          "link": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "artist_pack",
+          "type": "ANIMA_PACK",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaArtistPack"
+      },
+      "widgets_values": [
+        "wlop, sakimichan",
+        ""
+      ]
+    },
+    {
+      "id": 18,
+      "type": "AnimaArtistAdapterMixer",
+      "pos": [
+        780,
+        -250
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 22
+        },
+        {
+          "name": "artist_pack",
+          "type": "ANIMA_PACK",
+          "link": 24
+        },
+        {
+          "name": "strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength"
+          },
+          "link": null
+        },
+        {
+          "name": "normalize_weights",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "normalize_weights"
+          },
+          "link": null
+        },
+        {
+          "name": "alignment_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "alignment_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "name": "apply_to_uncond",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "apply_to_uncond"
+          },
+          "link": null
+        },
+        {
+          "name": "uncond_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "uncond_strength"
+          },
+          "link": null
+        },
+        {
+          "name": "advanced_options",
+          "type": "ANIMA_OPTS",
+          "link": 27
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            25
+          ]
+        },
+        {
+          "name": "base_prompt",
+          "type": "CONDITIONING",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaArtistAdapterMixer"
+      },
+      "widgets_values": [
+        1,
+        true,
+        "base_anchored",
+        true,
+        false,
+        0
+      ]
+    },
+    {
+      "id": 19,
+      "type": "AnimaArtistOptions",
+      "pos": [
+        820,
+        730
+      ],
+      "size": [
+        380,
+        560
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "start_block",
+          "type": "INT",
+          "widget": {
+            "name": "start_block"
+          },
+          "link": null
+        },
+        {
+          "name": "end_block",
+          "type": "INT",
+          "widget": {
+            "name": "end_block"
+          },
+          "link": null
+        },
+        {
+          "name": "start_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "start_percent"
+          },
+          "link": null
+        },
+        {
+          "name": "end_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "end_percent"
+          },
+          "link": null
+        },
+        {
+          "name": "normalize_weights",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "normalize_weights"
+          },
+          "link": null
+        },
+        {
+          "name": "artist_ema_alpha",
+          "type": "FLOAT",
+          "widget": {
+            "name": "artist_ema_alpha"
+          },
+          "link": null
+        },
+        {
+          "name": "lowrank_k",
+          "type": "INT",
+          "widget": {
+            "name": "lowrank_k"
+          },
+          "link": null
+        },
+        {
+          "name": "artist_static_capture",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "artist_static_capture"
+          },
+          "link": null
+        },
+        {
+          "name": "static_capture_k",
+          "type": "INT",
+          "widget": {
+            "name": "static_capture_k"
+          },
+          "link": null
+        },
+        {
+          "name": "artist_anchor_q",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "artist_anchor_q"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_seed_list",
+          "type": "STRING",
+          "widget": {
+            "name": "anchor_seed_list"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_seeds_count",
+          "type": "INT",
+          "widget": {
+            "name": "anchor_seeds_count"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_user_blend",
+          "type": "FLOAT",
+          "widget": {
+            "name": "anchor_user_blend"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_deep_layer_threshold",
+          "type": "INT",
+          "widget": {
+            "name": "anchor_deep_layer_threshold"
+          },
+          "link": null
+        },
+        {
+          "name": "stabilizer_end_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "stabilizer_end_percent"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_refresh_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "anchor_refresh_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_cache_points",
+          "type": "INT",
+          "widget": {
+            "name": "anchor_cache_points"
+          },
+          "link": null
+        },
+        {
+          "name": "layer_filter",
+          "type": "STRING",
+          "widget": {
+            "name": "layer_filter"
+          },
+          "link": null
+        },
+        {
+          "name": "anchor_keyframe_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "anchor_keyframe_mode"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "advanced_options",
+          "type": "ANIMA_OPTS",
+          "links": [
+            27
+          ]
+        },
+        {
+          "name": "anchor_seeds_used",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaArtistOptions"
+      },
+      "widgets_values": [
+        0,
+        -1,
+        0,
+        1,
+        true,
+        0,
+        1,
+        false,
+        6,
+        false,
+        "",
+        1,
+        0,
+        -1,
+        1,
+        "once",
+        8,
+        "",
+        "uniform_sigma"
+      ]
+    },
+    {
+      "id": 20,
+      "type": "AnimaRegionalSharedPromptV2",
+      "pos": [
+        360,
+        500
+      ],
+      "size": [
+        360,
+        190
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "scene_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "scene_prompt"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "scene_prompt",
+          "type": "STRING",
+          "links": [
+            28,
+            29
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AnimaRegionalSharedPromptV2"
+      },
+      "widgets_values": [
+        "masterpiece, best quality, anime illustration, upper body, two distinct women, one on the left and one on the right, facing each other, each gently reaching across the center to touch the other's hand, natural connected arms, both upper bodies leaning into the other side, coherent pose, clean silhouette, consistent lighting, detailed clothing"
+      ]
+    }
+  ],
+  "links": [
+    [
+      2,
+      3,
+      0,
+      12,
+      1,
+      "VAE"
+    ],
+    [
+      3,
+      1,
+      0,
+      7,
+      0,
+      "CLIP"
+    ],
+    [
+      4,
+      6,
+      0,
+      7,
+      1,
+      "ANIMA_REGIONAL_LAYOUT_V2"
+    ],
+    [
+      5,
+      4,
+      0,
+      6,
+      4,
+      "ANIMA_REGIONAL_CHARACTER_V2"
+    ],
+    [
+      6,
+      5,
+      0,
+      6,
+      5,
+      "ANIMA_REGIONAL_CHARACTER_V2"
+    ],
+    [
+      7,
+      6,
+      1,
+      10,
+      0,
+      "INT"
+    ],
+    [
+      8,
+      6,
+      2,
+      10,
+      1,
+      "INT"
+    ],
+    [
+      9,
+      7,
+      0,
+      9,
+      1,
+      "ANIMA_REGIONAL_PACK_V2"
+    ],
+    [
+      10,
+      8,
+      0,
+      9,
+      4,
+      "ANIMA_REGIONAL_OPTIONS"
+    ],
+    [
+      11,
+      9,
+      0,
+      11,
+      0,
+      "MODEL"
+    ],
+    [
+      12,
+      9,
+      1,
+      11,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      13,
+      9,
+      2,
+      11,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      14,
+      10,
+      0,
+      11,
+      3,
+      "LATENT"
+    ],
+    [
+      15,
+      11,
+      0,
+      12,
+      0,
+      "LATENT"
+    ],
+    [
+      17,
+      12,
+      0,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      18,
+      6,
+      0,
+      14,
+      0,
+      "ANIMA_REGIONAL_LAYOUT_V2"
+    ],
+    [
+      19,
+      8,
+      0,
+      14,
+      1,
+      "ANIMA_REGIONAL_OPTIONS"
+    ],
+    [
+      20,
+      14,
+      2,
+      15,
+      0,
+      "IMAGE"
+    ],
+    [
+      21,
+      14,
+      3,
+      16,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      2,
+      0,
+      18,
+      0,
+      "MODEL"
+    ],
+    [
+      23,
+      1,
+      0,
+      17,
+      0,
+      "CLIP"
+    ],
+    [
+      24,
+      17,
+      0,
+      18,
+      1,
+      "ANIMA_PACK"
+    ],
+    [
+      25,
+      18,
+      0,
+      9,
+      0,
+      "MODEL"
+    ],
+    [
+      26,
+      18,
+      1,
+      7,
+      4,
+      "CONDITIONING"
+    ],
+    [
+      27,
+      19,
+      0,
+      18,
+      8,
+      "ANIMA_OPTS"
+    ],
+    [
+      28,
+      20,
+      0,
+      17,
+      2,
+      "STRING"
+    ],
+    [
+      29,
+      20,
+      0,
+      7,
+      2,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.72,
+      "offset": [
+        -80,
+        -20
+      ]
+    }
+  },
+  "version": 0.4
+}

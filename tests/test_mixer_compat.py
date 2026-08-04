@@ -175,6 +175,8 @@ def _v2_runtime_state():
         "diffusion_model": _DiffusionModel(),
         "blend_mode": "replace",
         "global_strength": 1.0,
+        "global_mix_weight": 0.25,
+        "routing_contract": "legacy_v2",
         "boundary_falloff": 0,
         "composition_mode": "off",
         "multi_character_guard": "off",
@@ -258,9 +260,21 @@ class TestMixerProtocol(unittest.TestCase):
         ).unsqueeze(-1).expand_as(output)
         self.assertTrue(torch.equal(output, expected))
 
-    def test_v2_identity_anchor_uses_anchor_q_for_shared_and_character_branches(self):
+    def test_v2_classic_route_uses_anchor_q_for_complete_character_branches(self):
         anchor = _AnchorQPatch()
         state = _v2_runtime_state()
+        for character in state["characters"]:
+            character["pose_conditioning"] = {
+                "raw": torch.full((1, 2, 3), 100.0),
+                "ids": None,
+                "weights": None,
+            }
+            character["identity_conditioning"] = {
+                "raw": torch.full((1, 2, 3), 200.0),
+                "ids": None,
+                "weights": None,
+            }
+        state["has_identity_conditioning"] = True
         wrapper = V2RegionalCrossAttention(anchor, state, 0)
         x = torch.full((1, 8, 3), 2.0)
         context = torch.zeros((1, 2, 3))
@@ -268,7 +282,9 @@ class TestMixerProtocol(unittest.TestCase):
 
         output = wrapper.forward(x, context, transformer_options=options)
 
-        self.assertEqual(len(anchor.calls), 4)
+        # Base + one complete context per character. Split identity/pose specs
+        # are deliberately ignored by the classic execution contract.
+        self.assertEqual(len(anchor.calls), 3)
         self.assertTrue(all(torch.equal(call, x) for call in anchor.calls))
         expected_q = torch.full_like(x, 9.0)
         self.assertTrue(
@@ -276,13 +292,50 @@ class TestMixerProtocol(unittest.TestCase):
         )
         self.assertTrue(all(value is options for value in anchor.options))
         expected = torch.tensor(
-            [[14.0, 14.0, 24.0, 24.0, 14.0, 14.0, 24.0, 24.0]]
+            [[19.0, 19.0, 29.0, 29.0, 19.0, 19.0, 29.0, 29.0]]
         ).unsqueeze(-1).expand_as(output)
         self.assertTrue(torch.equal(output, expected))
+
+    def test_v2_unknown_routing_contract_is_rejected(self):
+        anchor = _AnchorQPatch()
+        state = _v2_runtime_state()
+        state["routing_contract"] = "interaction_v2"
+        wrapper = V2RegionalCrossAttention(anchor, state, 0)
+        with self.assertRaisesRegex(ValueError, "unsupported V2 routing contract"):
+            wrapper.forward(
+                torch.zeros((1, 8, 3)),
+                torch.zeros((1, 2, 3)),
+                transformer_options={"cond_or_uncond": [0]},
+            )
+
+    def test_v2_global_mix_uses_anchor_q_for_base_and_complete_branches(self):
+        anchor = _AnchorQPatch()
+        state = _v2_runtime_state()
+        state["routing_contract"] = "global_mix_v1"
+        state["global_mix_weight"] = 0.25
+        wrapper = V2RegionalCrossAttention(anchor, state, 0)
+        x = torch.full((1, 8, 3), 2.0)
+        context = torch.zeros((1, 2, 3))
+        options = {"cond_or_uncond": [0], "sentinel": object()}
+
+        output = wrapper.forward(x, context, transformer_options=options)
+
+        self.assertEqual(len(anchor.calls), 3)
+        self.assertTrue(all(torch.equal(call, x) for call in anchor.calls))
+        expected_q = torch.full_like(x, 9.0)
+        self.assertTrue(
+            all(torch.equal(transformed, expected_q) for transformed in anchor.transformed_q)
+        )
+        self.assertTrue(all(value is options for value in anchor.options))
+        expected = torch.tensor(
+            [[17.0, 17.0, 25.0, 25.0, 17.0, 17.0, 25.0, 25.0]]
+        ).unsqueeze(-1).expand_as(output)
+        self.assertTrue(torch.allclose(output, expected))
 
     def test_v2_late_identity_detail_keeps_q_only_anchor_as_inner_callable(self):
         anchor = _AnchorQPatch()
         state = _v2_runtime_state()
+        state["routing_contract"] = "separated_v1"
         state["characters"][0]["identity_conditioning"] = {
             "raw": torch.full((1, 2, 3), 30.0),
             "ids": None,

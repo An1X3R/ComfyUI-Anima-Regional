@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 
 import torch
 
@@ -20,7 +21,122 @@ from .validation import (
 
 _V2_MULTI_CHARACTER_GUARDS = ("off", "soft", "strong")
 _V2_DETAIL_PRESERVE_MODES = ("off", "soft", "strong")
+_V2_HINT_CONSTRAINT_MODES = ("off", "soft", "strong")
+_V2_CHARACTER_FOCUS_MODES = ("off", "adaptive")
 _V2_IDENTITY_ANCHOR_MODES = ("off", "shared_delta")
+_V2_ROUTING_MODES = (
+    "classic_0_2",
+    "global_mix_v1",
+    "separated_v1_experimental",
+)
+
+
+def _normalize_routing_mode(value):
+    aliases = {
+        "classic_0_2": ("classic_0_2", "legacy_v2"),
+        "legacy_v2": ("classic_0_2", "legacy_v2"),
+        "global_mix_v1": ("global_mix_v1", "global_mix_v1"),
+        "separated_v1_experimental": (
+            "separated_v1_experimental",
+            "separated_v1",
+        ),
+        "separated_v1": ("separated_v1_experimental", "separated_v1"),
+    }
+    mode = str(value or "classic_0_2")
+    if mode not in aliases:
+        raise _error(
+            "routing_mode must be classic_0_2, global_mix_v1, or "
+            "separated_v1_experimental"
+        )
+    return aliases[mode]
+
+
+def _validate_global_mix_weight(value):
+    try:
+        weight = float(value)
+    except (TypeError, ValueError) as exc:
+        raise _error("global_mix_weight must be a number") from exc
+    if not 0.0 <= weight <= 2.0:
+        raise _error("global_mix_weight must be between 0 and 2")
+    return weight
+
+
+def _join_prompt_parts(*parts):
+    return "\n".join(part for part in parts if part)
+
+
+def _resolved_character_text(character):
+    identity_text = character.get("identity_prompt", "")
+    pose_text = character.get("pose_prompt", "")
+    legacy_text = character.get("prompt", "")
+    legacy_ignored = bool(identity_text and legacy_text)
+    if not identity_text:
+        identity_text = legacy_text
+    return identity_text, pose_text, legacy_ignored
+
+
+def _body_center_x(layout, character_uuid):
+    weighted_center = 0.0
+    total_area = 0.0
+    for region in layout["regions"]:
+        if (
+            not region["enabled"]
+            or region["type"] != "body_region"
+            or region["character_uuid"] != character_uuid
+        ):
+            continue
+        area = float(region["width"]) * float(region["height"])
+        weighted_center += (
+            float(region["x"]) + float(region["width"]) * 0.5
+        ) * area
+        total_area += area
+    if total_area <= 0.0:
+        return None
+    return weighted_center / total_area
+
+
+def _explicit_sides(text, label=None):
+    text = str(text or "")
+    if not text:
+        return set()
+    if label:
+        escaped = re.escape(str(label))
+        return {
+            match.group(1).lower()
+            for match in re.finditer(
+                rf"\b{escaped}\b\s+"
+                r"(?:(?:stands|standing|is|positioned|placed)\s+)?"
+                r"(?:on|at)\s+the\s+(left|right)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        }
+    return {
+        match.group(1).lower()
+        for match in re.finditer(
+            r"\b(?:standing|positioned|placed)?\s*(?:on|at)\s+the\s+(left|right)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    }
+
+
+def _position_warnings(layout, interaction_text):
+    warnings = []
+    for character in layout["characters"]:
+        center = _body_center_x(layout, character["uuid"])
+        if center is None or 0.45 <= center <= 0.55:
+            continue
+        expected = "left" if center < 0.5 else "right"
+        opposite = "right" if expected == "left" else "left"
+        sides = _explicit_sides(character.get("pose_prompt", ""))
+        sides.update(_explicit_sides(interaction_text, character["label"]))
+        if opposite in sides:
+            warnings.append(
+                f"{character['label']}: Body center is on the {expected}, "
+                f"but prompt text explicitly says {opposite}"
+            )
+    return warnings
 
 
 def _validate_pack(pack):
@@ -45,8 +161,13 @@ def _validate_pack(pack):
                 )
 
     routing_contract = pack.get("routing_contract", "legacy_v2")
-    if routing_contract not in ("legacy_v2", "separated_v1"):
+    if routing_contract not in ("legacy_v2", "global_mix_v1", "separated_v1"):
         raise _error("prompt pack has an unsupported routing contract")
+    if "routing_mode" in pack:
+        _, expected_contract = _normalize_routing_mode(pack.get("routing_mode"))
+        if expected_contract != routing_contract:
+            raise _error("prompt pack routing mode does not match its contract")
+    _validate_global_mix_weight(pack.get("global_mix_weight", 0.25))
     for entry in entries:
         if not isinstance(entry, dict):
             raise _error("prompt pack has an invalid character conditioning entry")
@@ -170,6 +291,14 @@ class AnimaRegionalPromptPackV2:
                 "base_positive": ("CONDITIONING",),
                 "base_negative": ("CONDITIONING",),
                 "layout_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "routing_mode": (
+                    list(_V2_ROUTING_MODES),
+                    {"default": "classic_0_2"},
+                ),
+                "global_mix_weight": (
+                    "FLOAT",
+                    {"default": 0.25, "min": 0.0, "max": 2.0, "step": 0.05},
+                ),
             },
         }
 
@@ -187,11 +316,98 @@ class AnimaRegionalPromptPackV2:
         base_positive=None,
         base_negative=None,
         layout_prompt="",
+        routing_mode="classic_0_2",
+        global_mix_weight=0.25,
     ):
         layout = validate_layout(layout)
         background_text = _text(global_prompt, "global_prompt", required=False)
         layout_text = _text(layout_prompt, "layout_prompt", required=False)
         negative_text = _text(negative_prompt, "negative_prompt", required=False)
+        routing_mode, routing_contract = _normalize_routing_mode(routing_mode)
+        global_mix_weight = _validate_global_mix_weight(global_mix_weight)
+        shared_scene_text = _join_prompt_parts(background_text, layout_text)
+
+        resolved_characters = []
+        warnings = []
+        for character in layout["characters"]:
+            identity_text, pose_text, legacy_ignored = _resolved_character_text(
+                character
+            )
+            if legacy_ignored:
+                warnings.append(
+                    f"{character['label']}: ignored legacy prompt because identity_prompt is set"
+                )
+            resolved_characters.append(
+                (character, identity_text, pose_text, legacy_ignored)
+            )
+
+        if routing_contract in ("legacy_v2", "global_mix_v1"):
+            if base_positive is None:
+                positive = encode_prompt(
+                    clip,
+                    shared_scene_text,
+                    "global/shared scene",
+                )
+                background_spec = extract_conditioning(
+                    positive,
+                    "global/shared scene",
+                )
+            else:
+                positive = base_positive
+                background_spec = None
+            negative = (
+                base_negative
+                if base_negative is not None
+                else encode_prompt(clip, negative_text, "negative")
+            )
+
+            # Classic and Global Mix keep identity and pose separate in the
+            # UI/data layer, but evaluate one complete character branch.
+            # Ownership Hints select this same UUID-bound branch; they never
+            # create a second pose-only or limb-only context.
+            characters = []
+            for character, identity_text, pose_text, legacy_ignored in resolved_characters:
+                complete_text = _join_prompt_parts(
+                    identity_text,
+                    pose_text,
+                    shared_scene_text,
+                )
+                conditioning = extract_conditioning(
+                    encode_prompt(
+                        clip,
+                        complete_text,
+                        f"character {character['label']} complete",
+                    ),
+                    f"character {character['label']} complete",
+                )
+                characters.append({
+                    "uuid": character["uuid"],
+                    "label": character["label"],
+                    "strength": character["strength"],
+                    "conditioning": conditioning,
+                    "legacy_prompt_ignored": legacy_ignored,
+                })
+            return ({
+                "version": 2,
+                "routing_mode": routing_mode,
+                "routing_contract": routing_contract,
+                "global_mix_weight": global_mix_weight,
+                "layout": copy.deepcopy(layout),
+                "characters": characters,
+                "background_conditioning": background_spec,
+                "background_is_final": base_positive is None,
+                "layout_conditioning": None,
+                # Backward-compatible aliases for 0.3.x tooling. An external
+                # Mixer base intentionally does not cause a standalone shared
+                # branch to be encoded or evaluated in either complete-branch
+                # route.
+                "shared_conditioning": background_spec,
+                "shared_is_final": base_positive is None,
+                "warnings": warnings,
+                "positive": positive,
+                "negative": negative,
+            },)
+
         background_positive = encode_prompt(clip, background_text, "background/style")
         background_spec = extract_conditioning(
             background_positive,
@@ -207,22 +423,10 @@ class AnimaRegionalPromptPackV2:
                 "group layout/presence",
             )
 
-        # Iterate characters, never regions. Stable identity and pose are
-        # encoded separately so group count/layout text is never copied into
-        # every identity branch.
+        # Experimental separated routing retains the 0.4.1 identity/pose
+        # branches for controlled A/B comparison.
         characters = []
-        warnings = []
-        for character in layout["characters"]:
-            identity_text = character.get("identity_prompt", "")
-            pose_text = character.get("pose_prompt", "")
-            legacy_text = character.get("prompt", "")
-            legacy_ignored = bool(identity_text and legacy_text)
-            if not identity_text:
-                identity_text = legacy_text
-            elif legacy_ignored:
-                warnings.append(
-                    f"{character['label']}: ignored legacy prompt because identity_prompt is set"
-                )
+        for character, identity_text, pose_text, legacy_ignored in resolved_characters:
 
             identity_spec = None
             if identity_text:
@@ -268,7 +472,9 @@ class AnimaRegionalPromptPackV2:
             characters.append(entry)
         return ({
             "version": 2,
-            "routing_contract": "separated_v1",
+            "routing_mode": routing_mode,
+            "routing_contract": routing_contract,
+            "global_mix_weight": global_mix_weight,
             "layout": copy.deepcopy(layout),
             "characters": characters,
             "background_conditioning": background_spec,
@@ -309,6 +515,77 @@ class AnimaRegionalSharedPromptV2:
         return (str(scene_prompt or ""),)
 
 
+class AnimaRegionalPromptCompilerV2:
+    """Compile one synchronized scene source for Regional and Artist Mixer."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "layout": ("ANIMA_REGIONAL_LAYOUT_V2",),
+                "scene_prompt": (
+                    "STRING",
+                    {"multiline": True, "default": ""},
+                ),
+                "interaction_prompt": (
+                    "STRING",
+                    {"multiline": True, "default": ""},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = (
+        "regional_shared_prompt",
+        "mixer_full_context",
+        "compiled_preview",
+    )
+    FUNCTION = "compile_prompts"
+    CATEGORY = "Anima/Regional"
+
+    def compile_prompts(self, layout, scene_prompt, interaction_prompt):
+        layout = validate_layout(layout)
+        scene_text = _text(scene_prompt, "scene_prompt", required=False)
+        interaction_text = _text(
+            interaction_prompt,
+            "interaction_prompt",
+            required=False,
+        )
+        shared_text = _join_prompt_parts(scene_text, interaction_text)
+        mixer_parts = [shared_text]
+        preview_parts = ["[Regional Shared]", shared_text or "(empty)"]
+        warnings = _position_warnings(layout, interaction_text)
+
+        for character in layout["characters"]:
+            identity_text, pose_text, legacy_ignored = _resolved_character_text(
+                character
+            )
+            character_text = _join_prompt_parts(identity_text, pose_text)
+            mixer_parts.append(character_text)
+            complete_text = _join_prompt_parts(character_text, shared_text)
+            preview_parts.extend([
+                "",
+                f"[Character {character['label']} complete]",
+                complete_text or "(empty)",
+            ])
+            if legacy_ignored:
+                warnings.append(
+                    f"{character['label']}: legacy prompt is ignored because "
+                    "identity_prompt is set"
+                )
+
+        mixer_text = _join_prompt_parts(*mixer_parts)
+        preview_parts.extend([
+            "",
+            "[Mixer Full Context]",
+            mixer_text or "(empty)",
+            "",
+            "[Warnings]",
+            *(warnings or ["none"]),
+        ])
+        return shared_text, mixer_text, "\n".join(preview_parts)
+
+
 class AnimaRegionalOptionsV2:
     """Advanced controls whose values are consumed by the V2 router."""
 
@@ -337,6 +614,8 @@ class AnimaRegionalOptionsV2:
                 "identity_anchor_mode": (["off", "shared_delta"], {"default": "off"}),
                 "identity_anchor_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "identity_late_floor": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "hint_constraint_mode": (["off", "soft", "strong"], {"default": "off"}),
+                "character_focus_mode": (["off", "adaptive"], {"default": "off"}),
             },
         }
 
@@ -368,6 +647,8 @@ class AnimaRegionalOptionsV2:
         identity_anchor_mode="off",
         identity_anchor_strength=1.0,
         identity_late_floor=0.8,
+        hint_constraint_mode="off",
+        character_focus_mode="off",
     ):
         if float(start_percent) > float(end_percent):
             raise _error("start_percent must not exceed end_percent")
@@ -399,6 +680,10 @@ class AnimaRegionalOptionsV2:
             raise _error("identity_anchor_strength must be between 0 and 1")
         if not 0.0 <= float(identity_late_floor) <= 1.0:
             raise _error("identity_late_floor must be between 0 and 1")
+        if str(hint_constraint_mode) not in _V2_HINT_CONSTRAINT_MODES:
+            raise _error("hint_constraint_mode must be off, soft, or strong")
+        if str(character_focus_mode) not in _V2_CHARACTER_FOCUS_MODES:
+            raise _error("character_focus_mode must be off or adaptive")
         return ({
             "global_strength": float(global_strength),
             "start_block": int(start_block),
@@ -419,6 +704,8 @@ class AnimaRegionalOptionsV2:
             "identity_anchor_mode": str(identity_anchor_mode),
             "identity_anchor_strength": float(identity_anchor_strength),
             "identity_late_floor": float(identity_late_floor),
+            "hint_constraint_mode": str(hint_constraint_mode),
+            "character_focus_mode": str(character_focus_mode),
             "options_contract": "v2_routing_v1",
         },)
 
@@ -478,25 +765,75 @@ class AnimaRegionalApplyV2:
         composition_mode = str(options.get("composition_mode", "off"))
         multi_character_guard = str(options.get("multi_character_guard", "off"))
         detail_preserve_mode = str(options.get("detail_preserve_mode", "off"))
+        hint_constraint_mode = str(options.get("hint_constraint_mode", "off"))
+        character_focus_mode = str(options.get("character_focus_mode", "off"))
         identity_anchor_mode = str(options.get("identity_anchor_mode", "off"))
         identity_detail_mode = str(options.get("identity_detail_mode", "off"))
         routing_contract = regional_pack.get("routing_contract", "legacy_v2")
         layout_strength = float(options.get("layout_strength", 1.0))
-        composition_text = f", composition={composition_mode}"
-        if composition_mode == "early_layout":
-            composition_text += (
-                f" (strength={float(options.get('composition_strength', 1.0)):.2f},"
-                f" expand={float(options.get('composition_expand', 0.04)):.2f},"
-                f" end={float(options.get('composition_end_percent', 0.55)):.2f})"
-            )
-        composition_text += f", multi_guard={multi_character_guard}"
-        composition_text += f", detail={detail_preserve_mode}"
-        composition_text += f", layout_strength={layout_strength:.2f}"
         if routing_contract == "separated_v1":
-            composition_text += ", route=background+layout+pose+identity"
+            composition_text = ", route=separated_v1_experimental"
+            composition_text += f", composition={composition_mode}"
+            if composition_mode == "early_layout":
+                composition_text += (
+                    f" (strength={float(options.get('composition_strength', 1.0)):.2f},"
+                    f" expand={float(options.get('composition_expand', 0.04)):.2f},"
+                    f" end={float(options.get('composition_end_percent', 0.55)):.2f})"
+                )
+            composition_text += f", multi_guard={multi_character_guard}"
+            composition_text += f", detail={detail_preserve_mode}"
+            composition_text += f", layout_strength={layout_strength:.2f}"
+            if hint_constraint_mode != "off":
+                composition_text += ", hint_late_hold=ignored"
+            if character_focus_mode != "off":
+                composition_text += ", character_focus=ignored"
+        elif routing_contract == "global_mix_v1":
+            global_mix_weight = float(
+                regional_pack.get("global_mix_weight", 0.25)
+            )
+            nominal_base_share = global_mix_weight / (global_mix_weight + 1.0)
+            nominal_character_share = 1.0 - nominal_base_share
+            composition_text = (
+                ", route=global_mix_v1"
+                f", global/base_weight={global_mix_weight:.2f}"
+                f", nominal_mix={nominal_base_share:.0%} base + "
+                f"{nominal_character_share:.0%} character @ strength=1"
+            )
+            if detail_preserve_mode != "off":
+                composition_text += (
+                    f", detail={detail_preserve_mode}"
+                    f" (start={float(options.get('detail_preserve_start', 0.65)):.2f},"
+                    f" amount={float(options.get('detail_preserve_amount', 0.5)):.2f})"
+                )
+            if hint_constraint_mode != "off":
+                composition_text += f", hint_late_hold={hint_constraint_mode}"
+            if character_focus_mode != "off":
+                composition_text += f", character_focus={character_focus_mode}"
+            ignored_enhancements = (
+                composition_mode != "off"
+                or multi_character_guard != "off"
+                or layout_strength != 1.0
+                or float(options.get("edge_focus_power", 1.0)) != 1.0
+                or identity_anchor_mode != "off"
+                or identity_detail_mode != "off"
+            )
+            if ignored_enhancements:
+                composition_text += ", split-route enhancements=ignored"
         else:
-            composition_text += f", identity_anchor={identity_anchor_mode}"
-            composition_text += f", identity_detail={identity_detail_mode}"
+            composition_text = ", route=classic_0_2"
+            ignored_enhancements = (
+                composition_mode != "off"
+                or multi_character_guard != "off"
+                or detail_preserve_mode != "off"
+                or layout_strength != 1.0
+                or float(options.get("edge_focus_power", 1.0)) != 1.0
+                or identity_anchor_mode != "off"
+                or identity_detail_mode != "off"
+                or hint_constraint_mode != "off"
+                or character_focus_mode != "off"
+            )
+            if ignored_enhancements:
+                composition_text += ", post_0_2_enhancements=ignored"
         warning_text = ""
         if regional_pack.get("warnings"):
             warning_text = "; warnings=" + " | ".join(regional_pack["warnings"])
@@ -505,7 +842,9 @@ class AnimaRegionalApplyV2:
             positive,
             negative,
             f"active: {len(active_characters)} characters, "
-            f"overlap={layout['overlap_mode']}, blend={blend_mode}{composition_text}{warning_text}",
+            f"overlap={layout['overlap_mode']}, "
+            f"blend={'bounded_absolute' if routing_contract == 'global_mix_v1' else blend_mode}"
+            f"{composition_text}{warning_text}",
         )
 
 

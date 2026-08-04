@@ -94,7 +94,7 @@ def _apply_internal_boundary_falloff(effective, owners, active, radius: int):
     return effective * purity[:, 0].to(device=effective.device, dtype=effective.dtype)
 
 
-def build_character_masks(
+def build_character_mask_components(
     layout,
     height: int,
     width: int,
@@ -103,11 +103,27 @@ def build_character_masks(
     boundary_falloff: int = 0,
     body_expand: float = 0.0,
 ):
-    """Return raw max-union body masks and ownership masks by character UUID."""
+    """Return raw Body, final ownership, and Hint-target masks by UUID.
+
+    Equal-priority overlaps retain the automatic nearest-center/Voronoi
+    behavior. A higher ``priority`` restores the early front-to-back layer
+    override only where regions overlap. Hard Ownership Hints retain the
+    historical 0.2 behavior. A Hint with
+    ``hint_blend=soft`` crossfades from the current Body/Hard-Hint owner to the
+    Hint owner. Outside existing ownership coverage, partial Soft-Hint weight
+    intentionally leaves the remainder on the runtime base branch.
+    """
     device = device or torch.device("cpu")
     characters = layout["characters"]
     raw = {item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype) for item in characters}
-    hints = {item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype) for item in characters}
+    hard_hints = {
+        item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype)
+        for item in characters
+    }
+    soft_hints = {
+        item["uuid"]: torch.zeros((height, width), device=device, dtype=dtype)
+        for item in characters
+    }
     x = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) / width
     y = (torch.arange(height, device=device, dtype=torch.float32) + 0.5) / height
     yy, xx = torch.meshgrid(y, x, indexing="ij")
@@ -115,8 +131,24 @@ def build_character_masks(
         item["uuid"]: torch.full((height, width), torch.inf, device=device)
         for item in characters
     }
-    hint_distance = {
+    hard_hint_distance = {
         item["uuid"]: torch.full((height, width), torch.inf, device=device)
+        for item in characters
+    }
+    soft_hint_distance = {
+        item["uuid"]: torch.full((height, width), torch.inf, device=device)
+        for item in characters
+    }
+    body_priority = {
+        item["uuid"]: torch.full((height, width), -torch.inf, device=device)
+        for item in characters
+    }
+    hard_hint_priority = {
+        item["uuid"]: torch.full((height, width), -torch.inf, device=device)
+        for item in characters
+    }
+    soft_hint_priority = {
+        item["uuid"]: torch.full((height, width), -torch.inf, device=device)
         for item in characters
     }
     for region in layout["regions"]:
@@ -129,44 +161,117 @@ def build_character_masks(
         )
         mask = _box(source, height, width, device, dtype)
         is_body = region["type"] == "body_region"
-        target = raw if is_body else hints
-        distance_target = body_distance if is_body else hint_distance
         key = region["character_uuid"]
-        target[key] = torch.maximum(target[key], mask)
+        priority = float(region.get("priority", 0))
         distance = _distance_to_region_center(region, yy, xx)
-        distance_target[key] = torch.where(
-            mask > 1e-4,
-            torch.minimum(distance_target[key], distance),
-            distance_target[key],
+        if is_body:
+            raw[key] = torch.maximum(raw[key], mask)
+            active = mask > 1e-4
+            current_priority = body_priority[key]
+            higher = active & (priority > current_priority)
+            equal = active & (priority == current_priority)
+            body_distance[key] = torch.where(
+                higher,
+                distance,
+                torch.where(
+                    equal,
+                    torch.minimum(body_distance[key], distance),
+                    body_distance[key],
+                ),
+            )
+            body_priority[key] = torch.where(
+                active,
+                torch.maximum(
+                    current_priority,
+                    torch.full_like(current_priority, priority),
+                ),
+                current_priority,
+            )
+            continue
+
+        blend = str(region.get("hint_blend", "hard") or "hard")
+        if blend == "soft":
+            strength = max(0.0, min(1.0, float(region.get("strength", 1.0))))
+            target = soft_hints
+            distance_map = soft_hint_distance
+            priority_map = soft_hint_priority
+            mask = mask * strength
+        else:
+            target = hard_hints
+            distance_map = hard_hint_distance
+            priority_map = hard_hint_priority
+        target[key] = torch.maximum(target[key], mask)
+        active = mask > 1e-4
+        current_priority = priority_map[key]
+        higher = active & (priority > current_priority)
+        equal = active & (priority == current_priority)
+        distance_map[key] = torch.where(
+            higher,
+            distance,
+            torch.where(
+                equal,
+                torch.minimum(distance_map[key], distance),
+                distance_map[key],
+            ),
+        )
+        priority_map[key] = torch.where(
+            active,
+            torch.maximum(
+                current_priority,
+                torch.full_like(current_priority, priority),
+            ),
+            current_priority,
         )
 
     ordered = [item["uuid"] for item in characters]
     raw_stack = torch.stack([raw[key] for key in ordered])
     if layout["overlap_mode"] == "normalized":
         total = raw_stack.sum(dim=0, keepdim=True)
-        return raw_stack, raw_stack * torch.where(total > 1.0, total.reciprocal(), torch.ones_like(total))
+        effective = raw_stack * torch.where(
+            total > 1.0,
+            total.reciprocal(),
+            torch.ones_like(total),
+        )
+        return raw_stack, effective, torch.zeros_like(effective)
 
-    hint_stack = torch.stack([hints[key] for key in ordered])
+    hard_hint_stack = torch.stack([hard_hints[key] for key in ordered])
+    soft_hint_stack = torch.stack([soft_hints[key] for key in ordered])
     body_distance_stack = torch.stack([body_distance[key] for key in ordered])
-    hint_distance_stack = torch.stack([hint_distance[key] for key in ordered])
+    hard_hint_distance_stack = torch.stack(
+        [hard_hint_distance[key] for key in ordered]
+    )
+    soft_hint_distance_stack = torch.stack(
+        [soft_hint_distance[key] for key in ordered]
+    )
+    body_priority_stack = torch.stack([body_priority[key] for key in ordered])
+    hard_hint_priority_stack = torch.stack(
+        [hard_hint_priority[key] for key in ordered]
+    )
+    soft_hint_priority_stack = torch.stack(
+        [soft_hint_priority[key] for key in ordered]
+    )
     tie_break = _stable_uuid_tie_break(ordered, device)
 
-    # Body overlaps use a true nearest-center/Voronoi decision.  This removes
-    # the previous list-order bias while preserving hard exclusive ownership.
-    body_scores = body_distance_stack + tie_break
+    # Priority restores an explicit front-to-back layer only in intersections.
+    # Equal priorities keep the nearest-center/Voronoi decision and stable UUID
+    # tie-break, so existing layouts remain unchanged at the default value 0.
+    body_scores = body_distance_stack - body_priority_stack * 4.0 + tie_break
     body_active = torch.isfinite(body_scores).any(dim=0)
     body_winner = body_scores.argmin(dim=0)
 
-    # Ownership Hints are explicit local overrides.  When Hints themselves
-    # intersect, their nearest original center decides without socket order.
-    hint_scores = hint_distance_stack + tie_break
-    hint_active = torch.isfinite(hint_scores).any(dim=0)
-    hint_winner = hint_scores.argmin(dim=0)
+    # Hard Ownership Hints are explicit local overrides.  When Hints
+    # themselves intersect, their nearest original center decides without
+    # socket order.
+    hard_hint_scores = (
+        hard_hint_distance_stack - hard_hint_priority_stack * 4.0 + tie_break
+    )
+    hard_hint_active = torch.isfinite(hard_hint_scores).any(dim=0)
+    hard_hint_winner = hard_hint_scores.argmin(dim=0)
 
-    winner = torch.where(hint_active, hint_winner, body_winner)
-    active = hint_active | body_active
+    winner = torch.where(hard_hint_active, hard_hint_winner, body_winner)
+    active = hard_hint_active | body_active
     owners = torch.arange(len(ordered), device=device).view(-1, 1, 1) == winner.unsqueeze(0)
-    coverage = torch.maximum(raw_stack, hint_stack)
+    coverage = torch.maximum(raw_stack, hard_hint_stack)
     effective = coverage * owners.to(dtype) * active.unsqueeze(0).to(dtype)
     effective = _apply_internal_boundary_falloff(
         effective,
@@ -174,7 +279,56 @@ def build_character_masks(
         active.unsqueeze(0),
         boundary_falloff,
     )
-    return raw_stack, effective
+    hard_hint_targets = effective * hard_hint_active.unsqueeze(0).to(dtype)
+
+    # Soft Hints interpolate from the already resolved Body/Hard-Hint output
+    # to the selected complete character branch. Outside existing coverage,
+    # their partial weight leaves the runtime remainder on base. Hard Hints
+    # win where the two kinds overlap, preserving the historical contract.
+    soft_hint_scores = (
+        soft_hint_distance_stack - soft_hint_priority_stack * 4.0 + tie_break
+    )
+    soft_hint_active = torch.isfinite(soft_hint_scores).any(dim=0)
+    soft_hint_winner = soft_hint_scores.argmin(dim=0)
+    soft_alpha = torch.gather(
+        soft_hint_stack,
+        0,
+        soft_hint_winner.unsqueeze(0),
+    ).squeeze(0)
+    soft_alpha = torch.where(
+        soft_hint_active & ~hard_hint_active,
+        soft_alpha,
+        torch.zeros_like(soft_alpha),
+    )
+    soft_owner = (
+        torch.arange(len(ordered), device=device).view(-1, 1, 1)
+        == soft_hint_winner.unsqueeze(0)
+    ).to(dtype)
+    effective = effective * (1.0 - soft_alpha.unsqueeze(0)) + soft_owner * soft_alpha.unsqueeze(0)
+    hint_targets = hard_hint_targets + soft_owner * soft_alpha.unsqueeze(0)
+    return raw_stack, effective, hint_targets
+
+
+def build_character_masks(
+    layout,
+    height: int,
+    width: int,
+    device=None,
+    dtype=torch.float32,
+    boundary_falloff: int = 0,
+    body_expand: float = 0.0,
+):
+    """Return the historical two-value Body and ownership mask contract."""
+    raw, effective, _hint_targets = build_character_mask_components(
+        layout,
+        height,
+        width,
+        device=device,
+        dtype=dtype,
+        boundary_falloff=boundary_falloff,
+        body_expand=body_expand,
+    )
+    return raw, effective
 
 
 def build_identity_core_masks(

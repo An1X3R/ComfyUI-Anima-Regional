@@ -45,12 +45,18 @@ for node_id in (
     "AnimaRegionalPromptPackV2",
     "AnimaRegionalOptionsV2",
     "AnimaRegionalSharedPromptV2",
+    "AnimaRegionalPromptCompilerV2",
     "AnimaRegionalApplyV2",
     "AnimaRegionalInspectV2",
 ):
     assert node_id in NODE_CLASS_MAPPINGS
     assert node_id in plugin_module.NODE_CLASS_MAPPINGS
 assert plugin_module.WEB_DIRECTORY == "./web"
+prompt_pack_inputs = NODE_CLASS_MAPPINGS[
+    "AnimaRegionalPromptPackV2"
+].INPUT_TYPES()["optional"]
+assert "global_mix_v1" in prompt_pack_inputs["routing_mode"][0]
+assert prompt_pack_inputs["global_mix_weight"][1]["default"] == 0.25
 
 torch = __import__("torch")
 torch.manual_seed(7)

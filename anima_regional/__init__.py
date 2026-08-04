@@ -14,6 +14,7 @@ from .v2 import (
     AnimaRegionalLayoutV2,
     AnimaRegionalPromptPackV2,
     AnimaRegionalOptionsV2,
+    AnimaRegionalPromptCompilerV2,
     AnimaRegionalSharedPromptV2,
 )
 
@@ -27,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "AnimaRegionalLayoutV2": AnimaRegionalLayoutV2,
     "AnimaRegionalPromptPackV2": AnimaRegionalPromptPackV2,
     "AnimaRegionalOptionsV2": AnimaRegionalOptionsV2,
+    "AnimaRegionalPromptCompilerV2": AnimaRegionalPromptCompilerV2,
     "AnimaRegionalSharedPromptV2": AnimaRegionalSharedPromptV2,
     "AnimaRegionalApplyV2": AnimaRegionalApplyV2,
     "AnimaRegionalInspectV2": AnimaRegionalInspectV2,
@@ -42,6 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaRegionalLayoutV2": "Anima Regional - Layout",
     "AnimaRegionalPromptPackV2": "Anima Regional - Prompt Pack",
     "AnimaRegionalOptionsV2": "Anima Regional - V2 Routing Options",
+    "AnimaRegionalPromptCompilerV2": "Anima Regional - Prompt Compiler",
     "AnimaRegionalSharedPromptV2": "Anima Regional - Shared Scene Prompt",
     "AnimaRegionalApplyV2": "Anima Regional - Apply",
     "AnimaRegionalInspectV2": "Anima Regional - Inspect Masks",

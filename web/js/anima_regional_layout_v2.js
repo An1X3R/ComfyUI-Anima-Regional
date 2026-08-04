@@ -2,12 +2,21 @@ import { app } from "../../../scripts/app.js";
 
 const EDITOR_WIDTH = 460;
 const EDITOR_HEIGHT = 246;
-const EDITOR_BASE_NODE_HEIGHT = 610;
+const EDITOR_BASE_NODE_HEIGHT = 635;
 const EDITOR_MAX_CANVAS_HEIGHT = 420;
 const GRID_STEP = 1 / 32;
 const MAX_CHARACTERS = 8;
 const PALETTE = ["#E7584B", "#35A7D8", "#44B86B", "#E9A43A", "#9C65D1", "#D75C9A", "#35B9B1", "#B8BF42"];
 const REGION_TYPES = ["body_region", "ownership_hint"];
+const TOOLBAR_ACTIONS = [
+  { key: "body", icon: "+", tip: "Add body region" },
+  { key: "hint", icon: "!", tip: "Add Ownership Hint" },
+  { key: "copy", icon: "=", tip: "Copy selected region" },
+  { key: "mirror", icon: "↔", tip: "Mirror selected region horizontally" },
+  { key: "reciprocal", icon: "R", tip: "Add mirrored reciprocal Hint (exactly 2 characters)" },
+  { key: "mirror_all", icon: "⇄", tip: "Mirror the complete layout horizontally" },
+  { key: "delete", icon: "x", tip: "Delete selected region" },
+];
 
 function uuid(prefix) {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
@@ -16,6 +25,38 @@ function uuid(prefix) {
 
 function clamp(value, low, high) {
   return Math.min(high, Math.max(low, Number.isFinite(+value) ? +value : low));
+}
+
+export function mirrorRegionHorizontally(region) {
+  const width = clamp(region?.width, 0.001, 1);
+  const x = clamp(region?.x, 0, 1 - width);
+  return {
+    ...region,
+    x: clamp(1 - x - width, 0, 1 - width),
+    width,
+  };
+}
+
+export function mirroredRegionCopy(region, newUuid, newCharacterUuid = region?.character_uuid) {
+  return {
+    ...mirrorRegionHorizontally(region),
+    uuid: newUuid,
+    character_uuid: newCharacterUuid,
+  };
+}
+
+export function globalMixShares(baseWeight, characterStrength = 1) {
+  const base = Math.max(0, Number.isFinite(+baseWeight) ? +baseWeight : 0);
+  const character = Math.max(0, Number.isFinite(+characterStrength) ? +characterStrength : 0);
+  const total = base + character;
+  const baseShare = total > 0 ? base / total : 0;
+  const characterShare = total > 0 ? character / total : 0;
+  return {
+    baseShare,
+    characterShare,
+    basePercent: Math.round(baseShare * 100),
+    characterPercent: Math.round(characterShare * 100),
+  };
 }
 
 function widget(node, name) {
@@ -178,7 +219,7 @@ function scheduleCharacterInputSync(node) {
 }
 
 function regionRecord(character, type = "body_region") {
-  return {
+  const record = {
     uuid: uuid("region"),
     character_uuid: character.uuid,
     type,
@@ -188,8 +229,14 @@ function regionRecord(character, type = "body_region") {
     width: 0.5,
     height: 0.6,
     feather: 0,
+    priority: 0,
     enabled: true,
   };
+  if (type === "ownership_hint") {
+    record.hint_blend = "hard";
+    record.strength = 1;
+  }
+  return record;
 }
 
 function stateFor(node) {
@@ -303,30 +350,8 @@ function setJson(node) {
     height: Math.round(clamp(widgetValue(node, "height", 1024), 64, 8192)),
     overlap_mode: String(widgetValue(node, "overlap_mode", "exclusive")),
     characters: state.characters.map((item) => ({ ...item })),
-    regions: state.regions.map((region) => ({
-      uuid: region.uuid,
-      character_uuid: region.character_uuid,
-      type: REGION_TYPES.includes(region.type) ? region.type : "body_region",
-      geometry: "box",
-      x: clamp(region.x, 0, 1),
-      y: clamp(region.y, 0, 1),
-      width: clamp(region.width, 0.001, 1),
-      height: clamp(region.height, 0.001, 1),
-      feather: clamp(region.feather, 0, 1),
-      enabled: Boolean(region.enabled),
-    })),
-    orphaned_regions: [...state.orphaned.values()].map((region) => ({
-      uuid: region.uuid,
-      character_uuid: region.character_uuid,
-      type: REGION_TYPES.includes(region.type) ? region.type : "body_region",
-      geometry: "box",
-      x: clamp(region.x, 0, 1),
-      y: clamp(region.y, 0, 1),
-      width: clamp(region.width, 0.001, 1),
-      height: clamp(region.height, 0.001, 1),
-      feather: clamp(region.feather, 0, 1),
-      enabled: Boolean(region.enabled),
-    })),
+    regions: state.regions.map((region) => serializeRegion(region)),
+    orphaned_regions: [...state.orphaned.values()].map((region) => serializeRegion(region)),
   };
   for (const region of [...payload.regions, ...payload.orphaned_regions]) {
     region.width = Math.min(region.width, 1 - region.x);
@@ -337,6 +362,30 @@ function setJson(node) {
   syncHighlight(node);
   refreshControls(node);
   node.graph?.setDirtyCanvas?.(true, true);
+}
+
+function serializeRegion(region) {
+  const type = REGION_TYPES.includes(region.type) ? region.type : "body_region";
+  const result = {
+    uuid: region.uuid,
+    character_uuid: region.character_uuid,
+    type,
+    geometry: "box",
+    x: clamp(region.x, 0, 1),
+    y: clamp(region.y, 0, 1),
+    width: clamp(region.width, 0.001, 1),
+    height: clamp(region.height, 0.001, 1),
+    feather: clamp(region.feather, 0, 1),
+    priority: Math.round(clamp(region.priority ?? 0, -10, 10)),
+    enabled: Boolean(region.enabled),
+  };
+  if (type === "ownership_hint") {
+    result.hint_blend = ["hard", "soft"].includes(region.hint_blend)
+      ? region.hint_blend
+      : "hard";
+    result.strength = clamp(region.strength ?? 1, 0, 1);
+  }
+  return result;
 }
 
 function selectRegion(node, id) {
@@ -359,6 +408,8 @@ function addControlWidgets(node) {
         if (choice) region.character_uuid = choice.uuid;
       } else if (name === "enabled") region.enabled = Boolean(value);
       else if (name === "type") region.type = value;
+      else if (name === "hint_blend") region.hint_blend = ["hard", "soft"].includes(value) ? value : "hard";
+      else if (name === "priority") region.priority = Math.round(clamp(value, -10, 10));
       else region[name] = clamp(value, 0, 1);
       setJson(node);
     });
@@ -380,11 +431,15 @@ function addControlWidgets(node) {
     type,
     x: number("x", "x"), y: number("y", "y"), width: number("width", "width"), height: number("height", "height"),
     feather: number("feather", "feather"),
+    priority: editorWidget("number", "priority", "layer priority", 0, (value) => change("priority", value), { min: -10, max: 10, step: 1, precision: 0 }),
+    hintBlend: editorWidget("combo", "hint_blend", "hint blend", "hard", (value) => change("hint_blend", value), { values: ["hard", "soft"] }),
+    strength: number("strength", "hint strength"),
     enabled: editorWidget("toggle", "enabled", "enabled", true, (value) => change("enabled", value)),
     zoom: editorWidget("number", "zoom", "editor zoom", 1, (value) => { stateFor(node).zoom = clamp(value, 0.5, 2); node.graph?.setDirtyCanvas?.(true, true); }, { min: 0.5, max: 2, step: 0.1 }),
     grid: editorWidget("toggle", "grid", "snap to grid", true, (value) => { stateFor(node).grid = Boolean(value); node.graph?.setDirtyCanvas?.(true, true); }),
   };
   node._animaRegionalControls = controls;
+  controls.priority.tooltip = "Front/back ownership only where regions overlap. Higher wins; equal values keep automatic nearest-center ownership.";
 }
 
 function refreshControls(node) {
@@ -405,6 +460,9 @@ function refreshControls(node) {
   controls.character.value = selectedChar ? `${selectedChar.label} (${selectedChar.slot})` : "";
   controls.type.value = region.type;
   for (const key of ["x", "y", "width", "height", "feather", "enabled"]) controls[key].value = region[key];
+  controls.priority.value = Math.round(region.priority ?? 0);
+  controls.hintBlend.value = region.hint_blend || "hard";
+  controls.strength.value = region.strength ?? 1;
   controls.zoom.value = state.zoom;
   controls.grid.value = state.grid;
 }
@@ -462,7 +520,19 @@ function hitMode(rect, x, y) {
 function toolbarHit(x, y) {
   if (y < 3 || y > 27) return null;
   const index = Math.floor((x - 8) / 28);
-  return ["body", "hint", "copy", "delete"][index] || null;
+  return TOOLBAR_ACTIONS[index]?.key || null;
+}
+
+function toolbarActionEnabled(kind, selected, chars, state) {
+  if (kind === "body" || kind === "hint") return chars.length > 0;
+  if (kind === "copy" || kind === "mirror" || kind === "delete") return Boolean(selected);
+  if (kind === "mirror_all") return state.regions.length > 0 || state.orphaned.size > 0;
+  if (kind === "reciprocal") {
+    return selected?.type === "ownership_hint"
+      && chars.length === 2
+      && chars.some((item) => item.uuid !== selected.character_uuid);
+  }
+  return false;
 }
 
 function pointerEventKind(event) {
@@ -479,6 +549,10 @@ function snapToGrid(value, enabled) {
 }
 
 function action(node, kind) {
+  const initialState = stateFor(node);
+  const initialChars = connectedCharacters(node);
+  const initialSelected = currentRegion(node);
+  if (!toolbarActionEnabled(kind, initialSelected, initialChars, initialState)) return;
   graphChange(node, () => {
     const state = stateFor(node);
     const chars = connectedCharacters(node);
@@ -493,6 +567,20 @@ function action(node, kind) {
       const copy = { ...selected, uuid: uuid("region"), x: clamp(selected.x + 0.035, 0, 0.99 - selected.width), y: clamp(selected.y + 0.035, 0, 0.99 - selected.height) };
       state.regions.push(copy);
       selectRegion(node, copy.uuid);
+    } else if (kind === "mirror" && selected) {
+      Object.assign(selected, mirrorRegionHorizontally(selected));
+    } else if (kind === "reciprocal" && selected?.type === "ownership_hint" && chars.length === 2) {
+      const otherCharacter = chars.find((item) => item.uuid !== selected.character_uuid);
+      if (otherCharacter) {
+        const copy = mirroredRegionCopy(selected, uuid("region"), otherCharacter.uuid);
+        state.regions.push(copy);
+        selectRegion(node, copy.uuid);
+      }
+    } else if (kind === "mirror_all") {
+      state.regions = state.regions.map((region) => mirrorRegionHorizontally(region));
+      state.orphaned = new Map(
+        [...state.orphaned.entries()].map(([id, region]) => [id, mirrorRegionHorizontally(region)]),
+      );
     } else if (kind === "delete" && selected) {
       state.regions = state.regions.filter((item) => item.uuid !== selected.uuid);
       state.selected = state.regions[0]?.uuid || null;
@@ -508,14 +596,17 @@ function drawLayoutEditor(ctx, node, width, y) {
   const colors = new Map(chars.map((item) => [item.uuid, item.color || stableColor(item.uuid)]));
   ctx.save();
   ctx.font = "13px sans-serif";
-  const labels = [["+", "Add body region"], ["!", "Add Ownership Hint"], ["=", "Copy selected region"], ["x", "Delete selected region"]];
-  labels.forEach(([icon, tip], index) => {
+  const selected = currentRegion(node);
+  TOOLBAR_ACTIONS.forEach(({ key, icon, tip }, index) => {
     const x = 8 + (index * 28);
-    const hovered = state.hover === ["body", "hint", "copy", "delete"][index];
-    ctx.fillStyle = hovered ? "#58606e" : "#39414d";
+    const hovered = state.hover === key;
+    const enabled = toolbarActionEnabled(key, selected, chars, state);
+    ctx.fillStyle = enabled ? (hovered ? "#58606e" : "#39414d") : "#292f38";
     ctx.fillRect(x, y + 4, 22, 20);
-    ctx.fillStyle = "#e6edf3";
-    ctx.fillText(icon, x + 8, y + 19);
+    ctx.fillStyle = enabled ? "#e6edf3" : "#707985";
+    ctx.textAlign = "center";
+    ctx.fillText(icon, x + 11, y + 19);
+    ctx.textAlign = "left";
     if (hovered) {
       ctx.fillStyle = "#15191f";
       ctx.fillRect(x, y + 27, Math.max(122, ctx.measureText(tip).width + 12), 20);
@@ -557,18 +648,17 @@ function drawLayoutEditor(ctx, node, width, y) {
   ctx.strokeStyle = "#6a7380";
   ctx.strokeRect(canvas.x, canvas.y, canvas.width, canvas.height);
   ctx.fillStyle = "#b8c0ca";
-  const selected = currentRegion(node);
   const selectedCharacter = selected && chars.find((item) => item.uuid === selected.character_uuid);
   const overlapMode = String(widgetValue(node, "overlap_mode", "exclusive"));
   const selectedLabel = selectedCharacter ? selectedCharacter.label : "unassigned";
   const regionText = selected
-    ? `${selected.type.replace(/_/g, " ")} | ${selectedLabel} | ${selected.uuid.slice(-8)}`
+    ? `${selected.type.replace(/_/g, " ")} | ${selectedLabel} | layer ${Math.round(selected.priority ?? 0)} | ${selected.uuid.slice(-8)}`
     : "Connect a Character Prompt V2, then add a region.";
   const editorHeight = node._animaRegionalEditorHeight || editorHeightForNode(node);
   ctx.fillText(regionText, 8, y + editorHeight - 20);
   ctx.fillStyle = selected?.type === "ownership_hint" && overlapMode !== "exclusive" ? "#e9a43a" : "#8f9baa";
   const modeText = selected?.type === "ownership_hint"
-    ? (overlapMode === "exclusive" ? "Ownership Hint active in exclusive mode" : "Ownership Hint inactive in normalized mode")
+    ? `${overlapMode === "exclusive" ? "Ownership Hint active in exclusive mode" : "Ownership Hint inactive in normalized mode"} | ${selected.hint_blend || "hard"} ${Number(selected.strength ?? 1).toFixed(2)}`
     : `Frame ${canvas.imageWidth}x${canvas.imageHeight} | aspect ${canvas.aspect.toFixed(3)} | overlap ${overlapMode}`;
   ctx.fillText(modeText, 8, y + editorHeight - 5);
   ctx.restore();
@@ -786,7 +876,7 @@ function setCharacterPromptWidgetPresentation(node) {
     ],
     strength: [
       "character route strength",
-      "Strength of this character's main regional branch. Identity Detail has separate controls in Advanced Options.",
+      "Strength of this character branch. Use 1.0 to 2.0 for the classic_0_2 baseline; values above 2 are outside the historical baseline.",
     ],
   };
   for (const [name, [label, tooltip]] of Object.entries(presentation)) {
@@ -800,16 +890,72 @@ function setCharacterPromptWidgetPresentation(node) {
 function setPromptPackWidgetPresentation(node) {
   const presentation = {
     global_prompt: [
-      "background / style prompt",
-      "Only background, lighting, camera and style. Keep character count, names and poses in layout_prompt or Character nodes.",
+      "shared scene / background prompt",
+      "Shared background, lighting, camera, style and scene terms. classic_0_2 merges this into every complete character branch; separated_v1_experimental keeps it as the background branch.",
     ],
     layout_prompt: [
-      "group layout / presence",
-      "Shared composition, number of people, upper-body framing and interaction. It is routed once over the union of the Body boxes.",
+      "shared layout / presence prompt",
+      "Group count, framing, positions and interaction. classic_0_2 merges this into every complete character branch; separated_v1_experimental routes it once over the Body union.",
+    ],
+    routing_mode: [
+      "routing mode",
+      "classic_0_2 is the strong complete-character baseline. global_mix_v1 keeps the actual Mixer/base inside regions with bounded weight. separated_v1_experimental is retained only for comparison.",
+    ],
+    global_mix_weight: [
+      "base balance (Global Mix only)",
+      "How strongly the actual Mixer/base remains inside owned regions. The displayed percentage assumes character strength 1.0 and full mask coverage.",
     ],
     negative_prompt: ["negative prompt", "Optional text negative prompt. It is ignored when external negative conditioning is connected."],
     base_positive: ["external base positive (Mixer output)", "Connect the Post-Adapter Mixer's final positive conditioning here."],
     base_negative: ["external negative conditioning", "Optional external negative conditioning. When connected, the text negative prompt is ignored."],
+  };
+  for (const [name, [label, tooltip]] of Object.entries(presentation)) {
+    const item = widget(node, name);
+    if (!item) continue;
+    item.label = label;
+    item.tooltip = tooltip;
+  }
+
+  const mixWeight = widget(node, "global_mix_weight");
+  if (mixWeight) {
+    const refreshMixLabel = () => {
+      const weight = clamp(mixWeight.value, 0, 2);
+      const shares = globalMixShares(weight, 1);
+      mixWeight.label = `base balance (≈${shares.basePercent}% base @ strength 1)`;
+      mixWeight.tooltip = `Weight ${weight.toFixed(2)} is approximately ${shares.basePercent}% actual Mixer/base and ${shares.characterPercent}% complete character branch when character strength and mask coverage are 1.0. Higher character strength lowers the base share.`;
+      node.graph?.setDirtyCanvas?.(true, false);
+    };
+    if (!mixWeight._animaRegionalMixPresentationWrapped) {
+      const originalCallback = mixWeight.callback;
+      mixWeight.callback = function (value, ...args) {
+        const result = originalCallback?.call(this, value, ...args);
+        refreshMixLabel();
+        return result;
+      };
+      mixWeight._animaRegionalMixPresentationWrapped = true;
+    }
+    refreshMixLabel();
+  }
+}
+
+function setOptionsWidgetPresentation(node) {
+  const presentation = {
+    detail_preserve_mode: [
+      "late detail preserve",
+      "Global Mix: keep regional identity and interaction through early/mid denoising, then gradually return toward the actual Mixer/base so fine texture can finish. Off preserves the 0.4.4 result exactly.",
+    ],
+    detail_preserve_start: [
+      "detail fade start",
+      "Sampling progress where late detail preservation begins. For mild Global Mix correction, start around 0.70.",
+    ],
+    detail_preserve_amount: [
+      "detail fade amount",
+      "How much broad regional contribution is returned to the base by the final denoising stage. For slight blur, start around 0.30; Ownership Hint late hold can retain local limb ownership separately.",
+    ],
+    hint_constraint_mode: [
+      "Ownership Hint late hold",
+      "Global Mix only. Soft keeps half of the Hint correction that late detail preservation would otherwise release; strong keeps the resolved Hint target through the final denoising stage. Off preserves the 0.4.5 result.",
+    ],
   };
   for (const [name, [label, tooltip]] of Object.entries(presentation)) {
     const item = widget(node, name);
@@ -822,19 +968,27 @@ function setPromptPackWidgetPresentation(node) {
 app.registerExtension({
   name: "anima.regional.prompt-pack-v2-presentation",
   beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "AnimaRegionalPromptPackV2" && nodeData.name !== "AnimaRegionalSharedPromptV2") return;
+    if (!["AnimaRegionalPromptPackV2", "AnimaRegionalSharedPromptV2", "AnimaRegionalOptionsV2"].includes(nodeData.name)) return;
     const created = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (...args) {
       const result = created?.apply(this, args);
       if (nodeData.name === "AnimaRegionalPromptPackV2") setPromptPackWidgetPresentation(this);
-      else {
+      else if (nodeData.name === "AnimaRegionalSharedPromptV2") {
         const item = widget(this, "scene_prompt");
         if (item) {
-          item.label = "background / style prompt";
-          item.tooltip = "Enter background, lighting and style once. Keep group count and interaction in Prompt Pack layout_prompt.";
+          item.label = "shared scene prompt";
+          item.tooltip = "Use the same shared scene text for Artist Mixer and Regional Prompt Pack. classic_0_2 copies it into each complete character branch; separated_v1_experimental keeps separate background/layout branches.";
         }
-      }
+      } else setOptionsWidgetPresentation(this);
       return result;
     };
+    if (nodeData.name === "AnimaRegionalPromptPackV2") {
+      const configured = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (...args) {
+        const result = configured?.apply(this, args);
+        setTimeout(() => setPromptPackWidgetPresentation(this), 0);
+        return result;
+      };
+    }
   },
 });

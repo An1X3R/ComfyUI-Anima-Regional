@@ -190,7 +190,16 @@ def _validate_region(payload: Any, character_ids: set[str], index: int) -> dict[
     enabled = payload.get("enabled", True)
     if not isinstance(enabled, bool):
         raise _error(f"region {index} enabled must be boolean")
-    return {
+    priority_value = _number(
+        payload.get("priority", 0),
+        f"region {index} priority",
+    )
+    priority = int(priority_value)
+    if float(priority) != float(priority_value):
+        raise _error(f"region {index} priority must be an integer")
+    if not -10 <= priority <= 10:
+        raise _error(f"region {index} priority must be between -10 and 10")
+    result = {
         "uuid": _stable_id(payload.get("uuid"), f"region {index} uuid"),
         "character_uuid": character_uuid,
         "type": region_type,
@@ -200,8 +209,26 @@ def _validate_region(payload: Any, character_ids: set[str], index: int) -> dict[
         "width": width,
         "height": height,
         "feather": feather,
+        "priority": priority,
         "enabled": enabled,
     }
+    if region_type == "ownership_hint":
+        hint_blend = str(payload.get("hint_blend", "hard") or "hard")
+        if hint_blend not in ("hard", "soft"):
+            raise _error(
+                f"region {index} hint_blend must be hard or soft"
+            )
+        strength = _number(
+            payload.get("strength", 1.0),
+            f"region {index} strength",
+        )
+        if not 0.0 <= strength <= 1.0:
+            raise _error(f"region {index} strength must be between 0 and 1")
+        result.update({
+            "hint_blend": hint_blend,
+            "strength": strength,
+        })
+    return result
 
 
 def validate_layout(

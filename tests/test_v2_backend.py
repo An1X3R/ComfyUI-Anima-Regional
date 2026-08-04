@@ -10,16 +10,21 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from anima_regional import NODE_CLASS_MAPPINGS
-from anima_regional.v2.masks import build_character_masks
+from anima_regional.v2.masks import (
+    build_character_mask_components,
+    build_character_masks,
+)
 from anima_regional.v2.nodes import (
     AnimaRegionalApplyV2,
     AnimaRegionalCharacterPromptV2,
     AnimaRegionalInspectV2,
     AnimaRegionalLayoutV2,
     AnimaRegionalOptionsV2,
+    AnimaRegionalPromptCompilerV2,
     AnimaRegionalPromptPackV2,
     AnimaRegionalSharedPromptV2,
 )
+from anima_regional.v2.runtime import _adaptive_character_focus
 
 
 class FakeClip:
@@ -95,8 +100,18 @@ def layout(characters, regions, mode="exclusive"):
     return AnimaRegionalLayoutV2().build(128, 64, mode, {"version": 2, "regions": regions}, **kwargs)[0]
 
 
-def region(identifier, character_uuid, left, width, region_type="body_region"):
-    return {
+def region(
+    identifier,
+    character_uuid,
+    left,
+    width,
+    region_type="body_region",
+    *,
+    hint_blend=None,
+    strength=None,
+    priority=None,
+):
+    payload = {
         "uuid": identifier,
         "character_uuid": character_uuid,
         "type": region_type,
@@ -108,6 +123,13 @@ def region(identifier, character_uuid, left, width, region_type="body_region"):
         "feather": 0,
         "enabled": True,
     }
+    if hint_blend is not None:
+        payload["hint_blend"] = hint_blend
+    if strength is not None:
+        payload["strength"] = strength
+    if priority is not None:
+        payload["priority"] = priority
+    return payload
 
 
 def conditioning(value=1.0):
@@ -119,6 +141,10 @@ class TestV2DataContract(unittest.TestCase):
         self.assertIn("AnimaRegionalApply", NODE_CLASS_MAPPINGS)
         self.assertIs(NODE_CLASS_MAPPINGS["AnimaRegionalApplyV2"], AnimaRegionalApplyV2)
         self.assertIs(NODE_CLASS_MAPPINGS["AnimaRegionalSharedPromptV2"], AnimaRegionalSharedPromptV2)
+        self.assertIs(
+            NODE_CLASS_MAPPINGS["AnimaRegionalPromptCompilerV2"],
+            AnimaRegionalPromptCompilerV2,
+        )
         self.assertEqual(AnimaRegionalLayoutV2.RETURN_TYPES, ("ANIMA_REGIONAL_LAYOUT_V2", "INT", "INT"))
         self.assertEqual(
             AnimaRegionalApplyV2.INPUT_TYPES()["optional"]["advanced_options"][0],
@@ -131,15 +157,116 @@ class TestV2DataContract(unittest.TestCase):
         self.assertNotIn("self_attention_mode", inputs["required"])
         self.assertNotIn("branch_chunk_size", inputs["required"])
         self.assertIn("layout_strength", inputs["optional"])
-        options = AnimaRegionalOptionsV2().build(1.0, 0, -1, 0.0, 1.0, layout_strength=1.25)[0]
+        self.assertIn("hint_constraint_mode", inputs["optional"])
+        self.assertEqual(
+            list(inputs["optional"])[-2:],
+            ["hint_constraint_mode", "character_focus_mode"],
+        )
+        options = AnimaRegionalOptionsV2().build(
+            1.0,
+            0,
+            -1,
+            0.0,
+            1.0,
+            layout_strength=1.25,
+            hint_constraint_mode="soft",
+            character_focus_mode="adaptive",
+        )[0]
         self.assertEqual(options["options_contract"], "v2_routing_v1")
         self.assertEqual(options["layout_strength"], 1.25)
+        self.assertEqual(options["hint_constraint_mode"], "soft")
+        self.assertEqual(options["character_focus_mode"], "adaptive")
+        with self.assertRaisesRegex(ValueError, "character_focus_mode"):
+            AnimaRegionalOptionsV2().build(
+                1.0,
+                0,
+                -1,
+                0.0,
+                1.0,
+                character_focus_mode="invalid",
+            )
 
     def test_shared_scene_prompt_is_a_fanout_safe_string(self):
         node = AnimaRegionalSharedPromptV2()
         self.assertEqual(node.emit("  two characters, touching hands  \n")[0], "  two characters, touching hands  \n")
         self.assertEqual(node.emit(None)[0], "")
         self.assertEqual(node.RETURN_TYPES, ("STRING",))
+
+    def test_prompt_compiler_keeps_regional_and_mixer_text_in_sync(self):
+        kaltsit = AnimaRegionalCharacterPromptV2().build(
+            "Kal'tsit",
+            "",
+            1.0,
+            "",
+            "kaltsit",
+            "Kal'tsit identity",
+            "standing on the left, touching Mon3tr",
+        )[0]
+        mon3tr = AnimaRegionalCharacterPromptV2().build(
+            "Mon3tr",
+            "",
+            1.0,
+            "",
+            "mon3tr",
+            "Mon3tr identity",
+            "standing on the right, being touched by Kal'tsit",
+        )[0]
+        item = layout(
+            [kaltsit, mon3tr],
+            [
+                region("kaltsit-body", "kaltsit", 0.0, 0.5),
+                region("mon3tr-body", "mon3tr", 0.5, 0.5),
+            ],
+        )
+        shared, mixer, preview = AnimaRegionalPromptCompilerV2().compile_prompts(
+            item,
+            "soft painterly scene",
+            "Kal'tsit on the left gently pats Mon3tr on the right",
+        )
+        self.assertEqual(
+            shared,
+            "soft painterly scene\n"
+            "Kal'tsit on the left gently pats Mon3tr on the right",
+        )
+        self.assertEqual(
+            mixer,
+            f"{shared}\n"
+            "Kal'tsit identity\nstanding on the left, touching Mon3tr\n"
+            "Mon3tr identity\nstanding on the right, being touched by Kal'tsit",
+        )
+        self.assertIn(
+            f"Kal'tsit identity\nstanding on the left, touching Mon3tr\n{shared}",
+            preview,
+        )
+        self.assertIn(
+            f"Mon3tr identity\nstanding on the right, being touched by Kal'tsit\n{shared}",
+            preview,
+        )
+        self.assertTrue(preview.endswith("[Warnings]\nnone"))
+
+    def test_prompt_compiler_warns_about_explicit_side_conflicts(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "Alice identity",
+            "standing on the right",
+        )[0]
+        item = layout(
+            [alice],
+            [region("alice-body", "alice", 0.0, 0.4)],
+        )
+        _, _, preview = AnimaRegionalPromptCompilerV2().compile_prompts(
+            item,
+            "scene",
+            "Alice stands on the right",
+        )
+        self.assertIn(
+            "Alice: Body center is on the left, but prompt text explicitly says right",
+            preview,
+        )
 
     def test_hidden_unique_id_is_stable_and_distinguishes_nodes(self):
         node = AnimaRegionalCharacterPromptV2()
@@ -171,6 +298,96 @@ class TestV2DataContract(unittest.TestCase):
         self.assertEqual(payload["identity_prompt"], "brown hair, blue eyes, white coat")
         self.assertEqual(payload["pose_prompt"], "reaching toward the right")
 
+    def test_prompt_pack_defaults_to_classic_complete_character_branch(self):
+        routing_input = AnimaRegionalPromptPackV2.INPUT_TYPES()["optional"]["routing_mode"]
+        self.assertEqual(routing_input[0][0], "classic_0_2")
+        self.assertIn("global_mix_v1", routing_input[0])
+        self.assertEqual(routing_input[1]["default"], "classic_0_2")
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes, white coat",
+            "reaching toward the right",
+        )[0]
+        clip = FakeClip()
+        pack = AnimaRegionalPromptPackV2().pack(
+            clip,
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "shared scene",
+            "negative",
+            layout_prompt="two people, one on each side",
+        )[0]
+        shared_scene = "shared scene\ntwo people, one on each side"
+        self.assertEqual(
+            clip.encoded,
+            [
+                shared_scene,
+                "negative",
+                "brown hair, blue eyes, white coat\n"
+                "reaching toward the right\n"
+                f"{shared_scene}",
+            ],
+        )
+        self.assertEqual(pack["routing_mode"], "classic_0_2")
+        self.assertEqual(pack["routing_contract"], "legacy_v2")
+        self.assertIn("conditioning", pack["characters"][0])
+        self.assertNotIn("identity_conditioning", pack["characters"][0])
+        self.assertNotIn("pose_conditioning", pack["characters"][0])
+        self.assertIsNone(pack["layout_conditioning"])
+
+    def test_prompt_pack_global_mix_uses_complete_branch_and_actual_base(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice",
+            "",
+            1.0,
+            "",
+            "alice",
+            "brown hair, blue eyes",
+            "reaching toward the right",
+        )[0]
+        clip = FakeClip()
+        base_positive = conditioning(9.0)
+        pack = AnimaRegionalPromptPackV2().pack(
+            clip,
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "shared scene",
+            "negative",
+            base_positive=base_positive,
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        self.assertEqual(
+            clip.encoded,
+            [
+                "negative",
+                "brown hair, blue eyes\nreaching toward the right\nshared scene",
+            ],
+        )
+        self.assertEqual(pack["routing_mode"], "global_mix_v1")
+        self.assertEqual(pack["routing_contract"], "global_mix_v1")
+        self.assertEqual(pack["global_mix_weight"], 0.25)
+        self.assertIs(pack["positive"], base_positive)
+        self.assertIsNone(pack["background_conditioning"])
+        self.assertIsNone(pack["shared_conditioning"])
+        self.assertIn("conditioning", pack["characters"][0])
+        self.assertNotIn("identity_conditioning", pack["characters"][0])
+        self.assertNotIn("pose_conditioning", pack["characters"][0])
+
+    def test_prompt_pack_rejects_invalid_global_mix_weight(self):
+        alice = character("alice", "Alice")
+        with self.assertRaisesRegex(ValueError, "global_mix_weight"):
+            AnimaRegionalPromptPackV2().pack(
+                FakeClip(),
+                layout([alice], [region("a", "alice", 0.0, 1.0)]),
+                "",
+                "",
+                routing_mode="global_mix_v1",
+                global_mix_weight=2.1,
+            )
+
     def test_prompt_pack_separates_background_layout_identity_and_pose(self):
         alice = AnimaRegionalCharacterPromptV2().build(
             "Alice",
@@ -188,6 +405,7 @@ class TestV2DataContract(unittest.TestCase):
             "shared scene",
             "negative",
             layout_prompt="two people, one on each side",
+            routing_mode="separated_v1_experimental",
         )[0]
         self.assertEqual(
             clip.encoded,
@@ -199,6 +417,7 @@ class TestV2DataContract(unittest.TestCase):
                 "reaching toward the right",
             ],
         )
+        self.assertEqual(pack["routing_mode"], "separated_v1_experimental")
         self.assertEqual(pack["routing_contract"], "separated_v1")
         self.assertIn("identity_conditioning", pack["characters"][0])
         self.assertIn("pose_conditioning", pack["characters"][0])
@@ -252,21 +471,89 @@ class TestV2DataContract(unittest.TestCase):
         self.assertAlmostEqual(result["regions"][0]["height"], .2)
         self.assertEqual(result["regions"][0]["feather"], 0.0)
 
+    def test_soft_hint_fields_are_canonicalized_and_validated(self):
+        alice = character("alice", "Alice")
+        result = layout(
+            [alice],
+            [
+                region(
+                    "hint",
+                    "alice",
+                    0.2,
+                    0.2,
+                    "ownership_hint",
+                    hint_blend="soft",
+                    strength=0.65,
+                )
+            ],
+        )
+        self.assertEqual(result["regions"][0]["hint_blend"], "soft")
+        self.assertEqual(result["regions"][0]["strength"], 0.65)
+        self.assertEqual(result["regions"][0]["priority"], 0)
+        with self.assertRaisesRegex(ValueError, "hint_blend"):
+            layout(
+                [alice],
+                [
+                    region(
+                        "hint",
+                        "alice",
+                        0.2,
+                        0.2,
+                        "ownership_hint",
+                        hint_blend="capsule",
+                    )
+                ],
+            )
+
+    def test_region_layer_priority_is_canonicalized_and_validated(self):
+        alice = character("alice", "Alice")
+        result = layout(
+            [alice],
+            [region("body", "alice", 0.0, 1.0, priority=3)],
+        )
+        self.assertEqual(result["regions"][0]["priority"], 3)
+        with self.assertRaisesRegex(ValueError, "priority must be an integer"):
+            layout(
+                [alice],
+                [region("body", "alice", 0.0, 1.0, priority=0.5)],
+            )
+        with self.assertRaisesRegex(ValueError, "priority must be between"):
+            layout(
+                [alice],
+                [region("body", "alice", 0.0, 1.0, priority=11)],
+            )
+        with self.assertRaisesRegex(ValueError, "strength"):
+            layout(
+                [alice],
+                [
+                    region(
+                        "hint",
+                        "alice",
+                        0.2,
+                        0.2,
+                        "ownership_hint",
+                        hint_blend="soft",
+                        strength=1.1,
+                    )
+                ],
+            )
+
     def test_character_is_encoded_once_even_with_two_body_regions(self):
         alice = character("alice", "Alice")
         regions = [
             {"uuid": "r1", "character_uuid": "alice", "type": "body_region", "geometry": "box", "x": 0, "y": 0, "width": .5, "height": 1, "feather": 0, "enabled": True},
             {"uuid": "r2", "character_uuid": "alice", "type": "body_region", "geometry": "box", "x": .5, "y": 0, "width": .5, "height": 1, "feather": 0, "enabled": True},
+            {"uuid": "hint", "character_uuid": "alice", "type": "ownership_hint", "geometry": "box", "x": .25, "y": 0, "width": .25, "height": 1, "feather": 0, "enabled": True},
         ]
         clip = FakeClip()
         pack = AnimaRegionalPromptPackV2().pack(clip, layout([alice], regions), "global", "negative")[0]
         self.assertEqual(len(pack["characters"]), 1)
-        self.assertEqual(clip.encoded, ["global", "negative", "Alice prompt"])
+        self.assertEqual(clip.encoded, ["global", "negative", "Alice prompt\nglobal"])
         self.assertTrue(pack["shared_is_final"])
         self.assertTrue(pack["background_is_final"])
         self.assertIs(pack["shared_conditioning"]["raw"], pack["positive"][0][0])
 
-    def test_external_conditioning_remains_final_while_shared_scene_is_encoded(self):
+    def test_external_conditioning_remains_final_without_standalone_classic_background(self):
         alice = character("alice", "Alice")
         external_positive, external_negative = conditioning(3.0), conditioning(-1.0)
         clip = FakeClip()
@@ -275,10 +562,11 @@ class TestV2DataContract(unittest.TestCase):
         self.assertIs(positive, external_positive)
         self.assertIs(negative, external_negative)
         self.assertEqual(status, "disabled; original model returned")
-        self.assertEqual(clip.encoded, ["global", "Alice prompt"])
+        self.assertEqual(clip.encoded, ["Alice prompt\nglobal"])
         self.assertFalse(pack["shared_is_final"])
         self.assertFalse(pack["background_is_final"])
-        self.assertIsNot(pack["shared_conditioning"]["raw"], external_positive[0][0])
+        self.assertIsNone(pack["shared_conditioning"])
+        self.assertIsNone(pack["background_conditioning"])
 
     def test_invalid_conditioning_is_rejected_before_runtime(self):
         alice = character("alice", "Alice")
@@ -380,6 +668,48 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertEqual(int(forward_by_id["alice"].sum()), 5)
         self.assertEqual(int(forward_by_id["bob"].sum()), 5)
 
+    def test_higher_layer_priority_wins_only_the_body_overlap(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.6, priority=1),
+            region("b", "bob", 0.4, 0.6, priority=0),
+        ]
+        _, effective = build_character_masks(layout([alice, bob], regions), 1, 10)
+        self.assertTrue(torch.all(effective[0, 0, :6] == 1.0))
+        self.assertTrue(torch.all(effective[1, 0, 6:] == 1.0))
+        self.assertEqual(float(effective[1, 0, 4]), 0.0)
+
+    def test_higher_layer_priority_resolves_overlapping_hints(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("body", "alice", 0.0, 1.0),
+            region(
+                "alice-hint",
+                "alice",
+                0.25,
+                0.25,
+                "ownership_hint",
+                priority=0,
+            ),
+            region(
+                "bob-hint",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                priority=2,
+            ),
+        ]
+        _, effective, hint_targets = build_character_mask_components(
+            layout([alice, bob], regions),
+            1,
+            8,
+        )
+        self.assertEqual(float(effective[0, 0, 2]), 0.0)
+        self.assertEqual(float(effective[1, 0, 2]), 1.0)
+        self.assertEqual(float(hint_targets[0, 0, 2]), 0.0)
+        self.assertEqual(float(hint_targets[1, 0, 2]), 1.0)
+
     def test_ownership_hint_overrides_body_voronoi_only_inside_hint(self):
         alice, bob = character("alice", "Alice"), character("bob", "Bob")
         regions = [
@@ -391,6 +721,123 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertEqual(float(effective[1, 0, 3]), 1.0)
         self.assertEqual(float(effective[0, 0, 3]), 0.0)
         self.assertEqual(float(effective[0, 0, 2]), 1.0)
+
+    def test_soft_hint_crossfades_from_current_body_owner(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.5),
+            region("b", "bob", 0.5, 0.5),
+            region(
+                "soft-hint",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        _, effective = build_character_masks(layout([alice, bob], regions), 1, 8)
+        self.assertAlmostEqual(float(effective[0, 0, 2]), 0.5)
+        self.assertAlmostEqual(float(effective[1, 0, 2]), 0.5)
+        self.assertAlmostEqual(float(effective[:, 0, 2].sum()), 1.0)
+        self.assertAlmostEqual(float(effective[0, 0, 4]), 0.0)
+        self.assertAlmostEqual(float(effective[1, 0, 4]), 1.0)
+
+    def test_hint_target_components_isolate_only_resolved_hint_owner(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("a", "alice", 0.0, 0.5),
+            region("b", "bob", 0.5, 0.5),
+            region(
+                "soft-hint",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        raw, effective, hint_targets = build_character_mask_components(
+            layout([alice, bob], regions),
+            1,
+            8,
+        )
+        self.assertEqual(tuple(raw.shape), (2, 1, 8))
+        self.assertAlmostEqual(float(effective[0, 0, 2]), 0.5)
+        self.assertAlmostEqual(float(effective[1, 0, 2]), 0.5)
+        self.assertAlmostEqual(float(hint_targets[0, 0, 2]), 0.0)
+        self.assertAlmostEqual(float(hint_targets[1, 0, 2]), 0.5)
+        self.assertEqual(float(hint_targets[:, 0, 4].sum()), 0.0)
+
+    def test_soft_hint_outside_body_activates_branch_without_full_coverage(self):
+        alice = character("alice", "Alice")
+        regions = [
+            region("body", "alice", 0.0, 0.5),
+            region(
+                "soft-hint",
+                "alice",
+                0.75,
+                0.125,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        _, effective = build_character_masks(layout([alice], regions), 1, 8)
+        self.assertAlmostEqual(float(effective[0, 0, 6]), 0.5)
+
+    def test_hard_hint_wins_over_overlapping_soft_hint(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("body", "alice", 0.0, 1.0),
+            region(
+                "soft-hint",
+                "alice",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+            region(
+                "hard-hint",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="hard",
+                strength=1.0,
+            ),
+        ]
+        _, effective = build_character_masks(layout([alice, bob], regions), 1, 8)
+        self.assertEqual(float(effective[0, 0, 2]), 0.0)
+        self.assertEqual(float(effective[1, 0, 2]), 1.0)
+
+    def test_explicit_hard_hint_matches_legacy_default(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        legacy_regions = [
+            region("a", "alice", 0.0, 0.5),
+            region("b", "bob", 0.5, 0.5),
+            region("hint", "bob", 0.3, 0.1, "ownership_hint"),
+        ]
+        explicit_regions = [
+            region("a", "alice", 0.0, 0.5),
+            region("b", "bob", 0.5, 0.5),
+            region(
+                "hint",
+                "bob",
+                0.3,
+                0.1,
+                "ownership_hint",
+                hint_blend="hard",
+                strength=1.0,
+            ),
+        ]
+        _, legacy = build_character_masks(layout([alice, bob], legacy_regions), 1, 10)
+        _, explicit = build_character_masks(layout([alice, bob], explicit_regions), 1, 10)
+        self.assertTrue(torch.equal(legacy, explicit))
 
     def test_early_expansion_keeps_symmetric_voronoi_ownership(self):
         alice, bob = character("alice", "Alice"), character("bob", "Bob")
@@ -435,12 +882,570 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertIs(positive, pack["positive"])
         self.assertIs(negative, pack["negative"])
         self.assertIn("1 characters", status)
-        self.assertIn("multi_guard=off", status)
+        self.assertIn("route=classic_0_2", status)
+
+    def test_pack_without_route_metadata_remains_classic_compatible(self):
+        alice = character("alice", "Alice")
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice], [region("a", "alice", 0.0, 1.0)]),
+            "global",
+            "",
+        )[0]
+        pack.pop("routing_mode")
+        pack.pop("routing_contract")
+        patched, _, _, status = AnimaRegionalApplyV2().apply(
+            FakeModel(),
+            pack,
+            True,
+            "replace",
+        )
+        state = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ].router.state
+        self.assertEqual(state["routing_contract"], "legacy_v2")
+        self.assertIn("route=classic_0_2", status)
+
+    def test_classic_routes_uuid_complete_branch_through_ownership_hint(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice", "", 1.0, "", "alice", "Alice identity", "Alice pose"
+        )[0]
+        bob = AnimaRegionalCharacterPromptV2().build(
+            "Bob", "", 1.0, "", "bob", "Bob identity", "Bob pose"
+        )[0]
+        regions = [
+            region("alice-body", "alice", 0.0, 0.5),
+            region("bob-body", "bob", 0.5, 0.5),
+            region("bob-hand", "bob", 0.25, 0.25, "ownership_hint"),
+        ]
+        model = FakeModel()
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice, bob], regions),
+            "shared scene",
+            "",
+            conditioning(0.0),
+            conditioning(-1.0),
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 10.0
+        )
+        pack["characters"][1]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        patched, _, _, status = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "replace",
+            {
+                "composition_mode": "early_layout",
+                "multi_character_guard": "strong",
+                "detail_preserve_mode": "strong",
+                "hint_constraint_mode": "strong",
+                "character_focus_mode": "adaptive",
+                "edge_focus_power": 2.0,
+                "identity_anchor_mode": "shared_delta",
+            },
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        state = patch.router.state
+        self.assertEqual(state["composition_mode"], "off")
+        self.assertEqual(state["multi_character_guard"], "off")
+        self.assertEqual(state["detail_preserve_mode"], "off")
+        self.assertEqual(state["hint_constraint_mode"], "off")
+        self.assertEqual(state["character_focus_mode"], "off")
+        self.assertEqual(state["identity_anchor_mode"], "off")
+        self.assertFalse(state["has_identity_conditioning"])
+        self.assertIn("post_0_2_enhancements=ignored", status)
+
+        state["input_shape"] = (1, 4, 4, 8)
+        output = patch(
+            torch.zeros((1, 8, 4)),
+            torch.zeros((1, 2, 4)),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        expected = torch.tensor(
+            [[10.0, 20.0, 20.0, 20.0, 10.0, 20.0, 20.0, 20.0]]
+        ).unsqueeze(-1).expand_as(output)
+        self.assertTrue(torch.equal(output, expected))
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [0.0, 10.0, 20.0],
+        )
+
+    def test_classic_soft_hint_crossfades_complete_branches_and_preserves_unconditional(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice", "", 1.0, "", "alice", "Alice identity", "Alice pose"
+        )[0]
+        bob = AnimaRegionalCharacterPromptV2().build(
+            "Bob", "", 1.0, "", "bob", "Bob identity", "Bob pose"
+        )[0]
+        regions = [
+            region("alice-body", "alice", 0.0, 0.5),
+            region("bob-body", "bob", 0.5, 0.5),
+            region(
+                "bob-hand-soft",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice, bob], regions),
+            "shared scene",
+            "",
+            conditioning(0.0),
+            conditioning(-1.0),
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 10.0
+        )
+        pack["characters"][1]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        model = FakeModel()
+        patched, _, _, _ = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "replace",
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        patch.router.state["input_shape"] = (2, 4, 4, 8)
+        base_context = torch.tensor([0.0, 100.0]).view(2, 1, 1).expand(
+            2, 2, 4
+        )
+        output = patch(
+            torch.zeros((2, 8, 4)),
+            base_context,
+            transformer_options={"cond_or_uncond": [0, 1]},
+        )
+        expected_conditional = torch.tensor(
+            [10.0, 15.0, 20.0, 20.0, 10.0, 15.0, 20.0, 20.0]
+        ).view(8, 1).expand(8, 4)
+        self.assertTrue(torch.equal(output[0], expected_conditional))
+        self.assertTrue(torch.equal(output[1], torch.full_like(output[1], 100.0)))
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [0.0, 10.0, 20.0],
+        )
+
+    def test_global_mix_blends_actual_base_complete_branches_and_soft_hint(self):
+        alice = AnimaRegionalCharacterPromptV2().build(
+            "Alice", "", 1.0, "", "alice", "Alice identity", "Alice pose"
+        )[0]
+        bob = AnimaRegionalCharacterPromptV2().build(
+            "Bob", "", 1.0, "", "bob", "Bob identity", "Bob pose"
+        )[0]
+        regions = [
+            region("alice-body", "alice", 0.0, 0.5),
+            region("bob-body", "bob", 0.5, 0.5),
+            region(
+                "bob-hand-soft",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice, bob], regions),
+            "shared scene",
+            "",
+            conditioning(100.0),
+            conditioning(-1.0),
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 10.0
+        )
+        pack["characters"][1]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        model = FakeModel()
+        patched, _, _, status = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "base_preserve",
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        patch.router.state["input_shape"] = (2, 4, 4, 8)
+        base_context = torch.tensor([100.0, 200.0]).view(2, 1, 1).expand(
+            2, 2, 4
+        )
+        output = patch(
+            torch.zeros((2, 8, 4)),
+            base_context,
+            transformer_options={"cond_or_uncond": [0, 1]},
+        )
+        expected_conditional = torch.tensor(
+            [28.0, 32.0, 36.0, 36.0, 28.0, 32.0, 36.0, 36.0]
+        ).view(8, 1).expand(8, 4)
+        self.assertTrue(torch.allclose(output[0], expected_conditional))
+        self.assertTrue(torch.equal(output[1], torch.full_like(output[1], 200.0)))
+        self.assertIn("route=global_mix_v1", status)
+        self.assertIn("global/base_weight=0.25", status)
+        self.assertIn("nominal_mix=20% base + 80% character @ strength=1", status)
+        self.assertIn("blend=bounded_absolute", status)
+        self.assertEqual(patch.router.state["global_mix_weight"], 0.25)
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [100.0, 10.0, 20.0],
+        )
+
+    def test_global_mix_keeps_uncovered_tokens_on_actual_base(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout(
+                [alice, bob],
+                [
+                    region("alice-body", "alice", 0.0, 0.25),
+                    region("bob-body", "bob", 0.75, 0.25),
+                ],
+            ),
+            "",
+            "",
+            conditioning(100.0),
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 10.0
+        )
+        pack["characters"][1]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        patched, _, _, _ = AnimaRegionalApplyV2().apply(
+            FakeModel(), pack, True, "replace"
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        patch.router.state["input_shape"] = (1, 4, 2, 8)
+        output = patch(
+            torch.zeros((1, 4, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        expected = torch.tensor([28.0, 100.0, 100.0, 36.0]).view(
+            1, 4, 1
+        ).expand_as(output)
+        self.assertTrue(torch.allclose(output, expected))
+
+    def test_global_mix_detail_preserve_fades_character_mix_only_late(self):
+        alice = character("alice", "Alice")
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice], [region("alice-body", "alice", 0.0, 1.0)]),
+            "",
+            "",
+            conditioning(100.0),
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        patched, _, _, status = AnimaRegionalApplyV2().apply(
+            FakeModel(),
+            pack,
+            True,
+            "replace",
+            {
+                "detail_preserve_mode": "soft",
+                "detail_preserve_start": 0.65,
+                "detail_preserve_amount": 0.25,
+            },
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        state = patch.router.state
+        self.assertEqual(state["detail_preserve_mode"], "soft")
+        self.assertIn("detail=soft (start=0.65, amount=0.25)", status)
+        state["input_shape"] = (1, 4, 4, 8)
+
+        # Without sampling metadata, behavior remains the exact 0.4.4 mix.
+        output_without_sigma = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertTrue(
+            torch.allclose(output_without_sigma, torch.full_like(output_without_sigma, 36.0))
+        )
+
+        state["detail_sigma_range"] = (0.0, 1.0)
+        state["current_sigma"] = 0.8
+        output_early = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertTrue(
+            torch.allclose(output_early, torch.full_like(output_early, 36.0))
+        )
+
+        state["current_sigma"] = 0.0
+        output_late = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertTrue(
+            torch.allclose(output_late, torch.full_like(output_late, 52.0))
+        )
+
+    def test_adaptive_character_focus_tracks_local_complete_branch_saliency(self):
+        state = {
+            "character_focus_mode": "adaptive",
+            "input_shape": (1, 4, 14, 14),
+            "patch_spatial": 2,
+            "patch_temporal": 1,
+        }
+        x = torch.zeros((1, 49, 4))
+        base = torch.zeros_like(x)
+        values = torch.full((7, 7), 0.25)
+        values[2:5, 2:5] = 2.0
+        branch = values.reshape(1, 49, 1).expand_as(x)
+        ownership = torch.ones((1, 49, 1))
+
+        focus = _adaptive_character_focus(
+            state, x, branch, base, ownership
+        ).reshape(7, 7)
+        self.assertGreater(float(focus[3, 3]), 0.9)
+        self.assertLess(float(focus[0, 0]), 0.1)
+        self.assertTrue(torch.all((focus >= 0.0) & (focus <= 1.0)))
+
+        uniform = _adaptive_character_focus(
+            state, x, torch.ones_like(x), base, ownership
+        )
+        self.assertTrue(torch.allclose(uniform, torch.full_like(uniform, 0.5)))
+        state["character_focus_mode"] = "off"
+        self.assertTrue(
+            torch.equal(
+                _adaptive_character_focus(state, x, branch, base, ownership),
+                torch.zeros_like(ownership),
+            )
+        )
+
+    def test_global_mix_adaptive_focus_and_hint_use_the_stronger_late_hold(self):
+        alice = character("alice", "Alice")
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout(
+                [alice],
+                [
+                    region("alice-body", "alice", 0.0, 1.0),
+                    region(
+                        "alice-hand",
+                        "alice",
+                        0.25,
+                        0.25,
+                        "ownership_hint",
+                    ),
+                ],
+            ),
+            "",
+            "",
+            conditioning(100.0),
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+        model = FakeModel()
+        patched, _, _, status = AnimaRegionalApplyV2().apply(
+            model,
+            pack,
+            True,
+            "replace",
+            {
+                "detail_preserve_mode": "soft",
+                "detail_preserve_start": 0.7,
+                "detail_preserve_amount": 0.3,
+                "hint_constraint_mode": "soft",
+                "character_focus_mode": "adaptive",
+            },
+        )
+        patch = patched.object_patches[
+            "diffusion_model.blocks.0.cross_attn.forward"
+        ]
+        state = patch.router.state
+        state["input_shape"] = (1, 4, 4, 8)
+        state["detail_sigma_range"] = (0.0, 1.0)
+        state["sampling_sigma_range"] = (0.0, 1.0)
+        state["current_sigma"] = 0.8
+        output_early = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+        self.assertTrue(
+            torch.equal(output_early, torch.full_like(output_early, 36.0))
+        )
+        state["current_sigma"] = 0.0
+        output = patch(
+            torch.zeros((1, 8, 4)),
+            torch.full((1, 2, 4), 100.0),
+            transformer_options={"cond_or_uncond": [0]},
+        )
+
+        expected = torch.tensor(
+            [50.4, 45.6, 50.4, 50.4, 50.4, 45.6, 50.4, 50.4]
+        ).view(1, 8, 1).expand_as(output)
+        self.assertTrue(torch.allclose(output, expected, atol=1e-4))
+        self.assertIn("character_focus=adaptive", status)
+        self.assertNotIn("split-route enhancements=ignored", status)
+        self.assertEqual(
+            model.diffusion_model.blocks[0].cross_attn.context_means,
+            [100.0, 20.0, 100.0, 20.0],
+        )
+
+    def test_global_mix_soft_hint_hold_strengthens_only_late_hint_targets(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("alice-body", "alice", 0.0, 0.5),
+            region("bob-body", "bob", 0.5, 0.5),
+            region(
+                "bob-hand-soft",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        pack = AnimaRegionalPromptPackV2().pack(
+            FakeClip(),
+            layout([alice, bob], regions),
+            "",
+            "",
+            conditioning(100.0),
+            routing_mode="global_mix_v1",
+            global_mix_weight=0.25,
+        )[0]
+        pack["characters"][0]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 10.0
+        )
+        pack["characters"][1]["conditioning"]["raw"] = torch.full(
+            (1, 2, 4), 20.0
+        )
+
+        outputs = {}
+        for hint_mode in ("off", "soft"):
+            patched, _, _, status = AnimaRegionalApplyV2().apply(
+                FakeModel(),
+                pack,
+                True,
+                "replace",
+                {
+                    "detail_preserve_mode": "soft",
+                    "detail_preserve_start": 0.7,
+                    "detail_preserve_amount": 0.3,
+                    "hint_constraint_mode": hint_mode,
+                },
+            )
+            patch = patched.object_patches[
+                "diffusion_model.blocks.0.cross_attn.forward"
+            ]
+            state = patch.router.state
+            state["input_shape"] = (1, 4, 4, 8)
+            state["detail_sigma_range"] = (0.0, 1.0)
+            state["sampling_sigma_range"] = (0.0, 1.0)
+            state["current_sigma"] = 0.0
+            outputs[hint_mode] = patch(
+                torch.zeros((1, 8, 4)),
+                torch.full((1, 2, 4), 100.0),
+                transformer_options={"cond_or_uncond": [0]},
+            )
+            if hint_mode == "soft":
+                self.assertIn("hint_late_hold=soft", status)
+
+        expected_off = torch.tensor(
+            [49.6, 52.4, 55.2, 55.2, 49.6, 52.4, 55.2, 55.2]
+        ).view(1, 8, 1).expand_as(outputs["off"])
+        expected_soft = torch.tensor(
+            [49.6, 47.6, 55.2, 55.2, 49.6, 47.6, 55.2, 55.2]
+        ).view(1, 8, 1).expand_as(outputs["soft"])
+        self.assertTrue(torch.allclose(outputs["off"], expected_off))
+        self.assertTrue(torch.allclose(outputs["soft"], expected_soft))
+
+    def test_global_mix_zero_base_weight_matches_classic_at_unit_strength(self):
+        alice, bob = character("alice", "Alice"), character("bob", "Bob")
+        regions = [
+            region("alice-body", "alice", 0.0, 0.5),
+            region("bob-body", "bob", 0.5, 0.5),
+            region(
+                "soft",
+                "bob",
+                0.25,
+                0.25,
+                "ownership_hint",
+                hint_blend="soft",
+                strength=0.5,
+            ),
+        ]
+        outputs = []
+        for routing_mode in ("classic_0_2", "global_mix_v1"):
+            pack = AnimaRegionalPromptPackV2().pack(
+                FakeClip(),
+                layout([alice, bob], regions),
+                "",
+                "",
+                conditioning(100.0),
+                routing_mode=routing_mode,
+                global_mix_weight=0.0,
+            )[0]
+            pack["characters"][0]["conditioning"]["raw"] = torch.full(
+                (1, 2, 4), 10.0
+            )
+            pack["characters"][1]["conditioning"]["raw"] = torch.full(
+                (1, 2, 4), 20.0
+            )
+            patched, _, _, _ = AnimaRegionalApplyV2().apply(
+                FakeModel(), pack, True, "replace"
+            )
+            patch = patched.object_patches[
+                "diffusion_model.blocks.0.cross_attn.forward"
+            ]
+            patch.router.state["input_shape"] = (1, 4, 4, 8)
+            outputs.append(
+                patch(
+                    torch.zeros((1, 8, 4)),
+                    torch.full((1, 2, 4), 100.0),
+                    transformer_options={"cond_or_uncond": [0]},
+                )
+            )
+        self.assertTrue(torch.equal(outputs[0], outputs[1]))
 
     def test_apply_filters_inactive_branches_and_honors_global_strength(self):
         alice, bob = character("alice", "Alice"), character("bob", "Bob")
         pack = AnimaRegionalPromptPackV2().pack(
-            FakeClip(), layout([alice, bob], [region("a", "alice", 0.0, 1.0)]), "", ""
+            FakeClip(),
+            layout([alice, bob], [region("a", "alice", 0.0, 1.0)]),
+            "",
+            "",
+            routing_mode="separated_v1_experimental",
         )[0]
         patched, _, _, _ = AnimaRegionalApplyV2().apply(
             FakeModel(), pack, True, "replace", {
@@ -450,6 +1455,8 @@ class TestV2MasksAndApply(unittest.TestCase):
                 "detail_preserve_mode": "soft",
                 "detail_preserve_start": 0.65,
                 "detail_preserve_amount": 0.5,
+                "hint_constraint_mode": "strong",
+                "character_focus_mode": "adaptive",
                 "edge_focus_power": 1.5,
             }
         )
@@ -460,6 +1467,8 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertEqual(state["boundary_falloff"], 2)
         self.assertEqual(state["multi_character_guard"], "soft")
         self.assertEqual(state["detail_preserve_mode"], "soft")
+        self.assertEqual(state["hint_constraint_mode"], "off")
+        self.assertEqual(state["character_focus_mode"], "off")
         self.assertEqual(state["edge_focus_power"], 1.5)
         state["input_shape"] = (1, 4, 4, 8)
         output = patch(
@@ -483,6 +1492,7 @@ class TestV2MasksAndApply(unittest.TestCase):
                     "background",
                     "",
                     conditioning(100.0),
+                    routing_mode="separated_v1_experimental",
                 )[0]
                 pack["background_conditioning"]["raw"] = torch.full(
                     (1, 2, 4), 10.0
@@ -527,6 +1537,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
@@ -558,6 +1569,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             layout([alice], [region("a", "alice", 0.0, 1.0)]),
             "global",
             "",
+            routing_mode="separated_v1_experimental",
         )[0]
         patched, _, _, _ = AnimaRegionalApplyV2().apply(
             model,
@@ -592,6 +1604,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 11.0)
@@ -622,6 +1635,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
@@ -665,6 +1679,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "",
             conditioning(100.0),
             layout_prompt="one person centered",
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["background_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["layout_conditioning"]["raw"] = torch.full((1, 2, 4), 20.0)
@@ -693,6 +1708,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
@@ -729,6 +1745,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
@@ -773,6 +1790,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         pack["shared_conditioning"]["raw"] = torch.full((1, 2, 4), 10.0)
         pack["characters"][0]["conditioning"]["raw"] = torch.full((1, 2, 4), 13.0)
@@ -812,7 +1830,7 @@ class TestV2MasksAndApply(unittest.TestCase):
         self.assertTrue(state["identity_context_cache"])
         self.assertEqual(state["identity_core_cache"], {})
 
-    def test_late_identity_detail_keeps_legacy_pack_at_zero_extra_branches(self):
+    def test_late_identity_detail_separated_pack_adds_no_duplicate_branch(self):
         alice = character("alice", "Alice")
         pack = AnimaRegionalPromptPackV2().pack(
             FakeClip(),
@@ -820,6 +1838,7 @@ class TestV2MasksAndApply(unittest.TestCase):
             "global",
             "",
             conditioning(100.0),
+            routing_mode="separated_v1_experimental",
         )[0]
         model = FakeModel()
         patched, _, _, _ = AnimaRegionalApplyV2().apply(

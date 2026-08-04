@@ -1,28 +1,21 @@
-# Example workflow
+# Example workflows
 
-`Anima-Regional-0.4.0-Mixer-Amiya-Kaltsit-separated.json` demonstrates:
+`Anima-Regional-0.4.7-Global-Mix-Adaptive-Focus.json` is the recommended
+starting point. It demonstrates:
 
-- two independent Character Prompt nodes;
-- overlapping Body regions and local Ownership Hints for crossed hands;
-- one background/style Shared Scene Prompt feeding both Mixer and Regional Prompt Pack;
-- a separate Prompt Pack `layout_prompt` for count, framing and crossed hands;
-- Post-Adapter Mixer before Regional Apply;
-- `base_preserve` routing;
-- the `separated_v1` background/layout/pose/identity route;
-- the V2-only Routing Options node without legacy strict controls.
+- two editable Character Prompt nodes with separate identity and pose fields;
+- Body regions plus small, soft UUID-bound Ownership Hints;
+- one Prompt Compiler feeding synchronized Regional and Mixer context;
+- the Artist Mixer before Regional Apply;
+- `global_mix_v1`, soft late detail preservation, and adaptive character focus;
+- VAE decode and output nodes kept after the model sampler.
 
-The workflow expects these node families:
+The workflow uses the standard `CLIPLoader`, `UNETLoader`, `VAELoader`,
+`AnimaArtistPack`, `AnimaArtistAdapterMixer`, and
+`AnimaFlowCorrectiveSampler` node families. Change the CLIP, UNET, VAE, and
+artist settings for your installation. The example does not include model
+weights or personal LoRAs.
 
-- this repository;
-- Anima Artist Mixer;
-- the Anima sampler node providing `AnimaFlowCorrectiveSampler`.
-
-Adjust the CLIP, UNET, and VAE filenames to match your installation.
-
-The example keeps only background/style in the Shared Scene Prompt. Group
-framing and interaction are in `layout_prompt`; character identity and local
-action are split between the two Character Prompt fields.
-
-The older `Anima-Regional-0.3.3-Mixer-Amiya-Kaltsit-identity-anchor.json` remains
-in the repository as a compatibility reference. Its legacy prompt fields still
-load, but the new example is the recommended starting point.
+`Anima-Regional-0.4.0-Mixer-Amiya-Kaltsit-separated.json` is retained as an
+experimental compatibility reference. `Anima-Regional-0.3.3-Mixer-Amiya-`
+`Kaltsit-identity-anchor.json` is the legacy reference.

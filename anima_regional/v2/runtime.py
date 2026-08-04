@@ -11,6 +11,7 @@ import copy
 import math
 
 import torch
+import torch.nn.functional as F
 
 from ..conditioning import broadcast_context, preprocess_conditioning
 from ..masks import infer_grid_shape
@@ -22,13 +23,18 @@ from ..runtime import (
     make_runtime_capture,
     validate_anima,
 )
-from .masks import build_character_masks, build_identity_core_masks
+from .masks import (
+    build_character_mask_components,
+    build_identity_core_masks,
+)
 from .validation import _error
 
 
 EXTENDED_DELTA_NORM_CAP = 4.0
 MULTI_CHARACTER_GUARDS = ("off", "soft", "strong")
 DETAIL_PRESERVE_MODES = ("off", "soft", "strong")
+HINT_CONSTRAINT_MODES = ("off", "soft", "strong")
+CHARACTER_FOCUS_MODES = ("off", "adaptive")
 IDENTITY_ANCHOR_MODES = ("off", "shared_delta")
 IDENTITY_DETAIL_MODES = ("off", "late")
 IDENTITY_DETAIL_NORM_CAP = 1.5
@@ -129,6 +135,66 @@ def _detail_preserve_scale(state):
     return 1.0 - (amount * phase)
 
 
+def _hint_constraint_scale(state, detail_scale):
+    """Return the late scale retained for resolved Ownership Hint targets."""
+    detail_scale = max(0.0, min(1.0, float(detail_scale)))
+    mode = str(state.get("hint_constraint_mode", "off"))
+    if mode == "soft":
+        return detail_scale + 0.5 * (1.0 - detail_scale)
+    if mode == "strong":
+        return 1.0
+    return detail_scale
+
+
+def _adaptive_character_focus(state, x, branch, base, ownership):
+    """Return a smoothed per-token saliency for one complete character branch.
+
+    The score is normalized inside the resolved ownership mask, so a broad
+    Mixer/style difference does not automatically turn the whole Body into a
+    fixed geometric core. Inputs are detached because the score is a routing
+    weight, not another model branch.
+    """
+    if str(state.get("character_focus_mode", "off")) != "adaptive":
+        return torch.zeros_like(ownership)
+
+    ownership_f = ownership.detach().to(torch.float32).clamp(0.0, 1.0)
+    active = ownership_f > 1e-6
+    mass = ownership_f.sum(dim=1, keepdim=True)
+    delta = (
+        branch.detach().to(torch.float32) - base.detach().to(torch.float32)
+    ).square().mean(dim=-1, keepdim=True).sqrt()
+    mean_delta = (delta * ownership_f).sum(dim=1, keepdim=True) / mass.clamp_min(
+        1e-6
+    )
+
+    # Half the owned mean maps to zero, the mean maps to a conservative 0.5,
+    # and 1.5x the mean maps to the maximum adaptive hold.
+    ratio = delta / mean_delta.clamp_min(1e-6)
+    focus = (ratio - 0.5).clamp(0.0, 1.0)
+    focus = focus * focus * (3.0 - 2.0 * focus)
+    focus = torch.where(mass > 1e-6, focus, torch.zeros_like(focus))
+
+    temporal, grid_h, grid_w = infer_grid_shape(
+        int(x.shape[1]),
+        state.get("input_shape"),
+        patch_spatial=int(state.get("patch_spatial", 2)),
+        patch_temporal=int(state.get("patch_temporal", 1)),
+    )
+    focus = focus.reshape(
+        int(focus.shape[0]) * temporal, 1, grid_h, grid_w
+    )
+    focus = F.avg_pool2d(
+        focus,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        count_include_pad=False,
+    )
+    focus = focus.reshape(int(ownership.shape[0]), -1, 1)
+    focus = torch.where(active, focus, torch.zeros_like(focus))
+    return focus.to(dtype=ownership.dtype)
+
+
 def _shape_region_weights(weights, power):
     """Reduce soft edge influence without moving or expanding ownership."""
     power = max(1.0, float(power))
@@ -192,7 +258,7 @@ def _sigma_range(model, start_percent, end_percent):
     return tuple(sorted(values))
 
 
-def _v2_weights(state, x, reference, body_expand=0.0):
+def _v2_weight_components(state, x, reference, body_expand=0.0):
     temporal, grid_h, grid_w = infer_grid_shape(
         int(x.shape[1]), state.get("input_shape"),
         patch_spatial=int(state.get("patch_spatial", 2)),
@@ -208,9 +274,11 @@ def _v2_weights(state, x, reference, body_expand=0.0):
         round(float(body_expand), 4),
     )
     cache = state.setdefault("mask_cache", {})
+    hint_cache = state.setdefault("hint_mask_cache", {})
     weights = cache.get(cache_key)
-    if weights is None:
-        raw, ownership = build_character_masks(
+    hint_weights = hint_cache.get(cache_key)
+    if weights is None or hint_weights is None:
+        raw, ownership, hint_targets = build_character_mask_components(
             state["layout"],
             grid_h,
             grid_w,
@@ -222,7 +290,16 @@ def _v2_weights(state, x, reference, body_expand=0.0):
         weights = ownership.unsqueeze(1).unsqueeze(1).expand(
             -1, int(x.shape[0]), temporal, -1, -1
         ).reshape(len(ownership), int(x.shape[0]), temporal * grid_h * grid_w, 1)
+        hint_weights = hint_targets.unsqueeze(1).unsqueeze(1).expand(
+            -1, int(x.shape[0]), temporal, -1, -1
+        ).reshape(
+            len(hint_targets),
+            int(x.shape[0]),
+            temporal * grid_h * grid_w,
+            1,
+        )
         cache[cache_key] = weights
+        hint_cache[cache_key] = hint_weights
         overlap = (raw.to(torch.float32).sum(dim=0) - 1.0).clamp(0.0, 1.0)
         overlap = overlap.reshape(1, 1, grid_h * grid_w, 1).expand(
             int(x.shape[0]), temporal, grid_h * grid_w, 1
@@ -237,6 +314,16 @@ def _v2_weights(state, x, reference, body_expand=0.0):
             device=reference.device,
             dtype=reference.dtype,
         ),
+    )
+    return weights, hint_weights
+
+
+def _v2_weights(state, x, reference, body_expand=0.0):
+    weights, _hint_weights = _v2_weight_components(
+        state,
+        x,
+        reference,
+        body_expand=body_expand,
     )
     return weights
 
@@ -306,11 +393,27 @@ class V2RegionalCrossAttention:
         cached = self.state.setdefault("context_cache", {}).get(key)
         if cached is None:
             cached = []
+            routing_contract = self.state.get("routing_contract", "legacy_v2")
+            if routing_contract not in (
+                "legacy_v2",
+                "global_mix_v1",
+                "separated_v1",
+            ):
+                raise _error(
+                    f"unsupported V2 routing contract: {routing_contract}"
+                )
             for character in self.state["characters"]:
+                if routing_contract in ("legacy_v2", "global_mix_v1"):
+                    spec = character.get("conditioning")
+                    cached.append(preprocess_conditioning(
+                        self.state["diffusion_model"], spec,
+                        reference_context.device, reference_context.dtype,
+                    ).detach())
+                    continue
                 pose_spec = character.get("pose_conditioning")
                 identity_spec = character.get("identity_conditioning")
                 if (
-                    self.state.get("routing_contract") == "separated_v1"
+                    routing_contract == "separated_v1"
                     and pose_spec is None
                     and isinstance(identity_spec, dict)
                 ):
@@ -400,6 +503,161 @@ class V2RegionalCrossAttention:
         base = self.inner_forward(x, context, rope_emb=rope_emb, transformer_options=options)
         routing_contract = self.state.get("routing_contract", "legacy_v2")
         contexts = self._contexts(context)
+
+        if routing_contract == "legacy_v2":
+            # Classic 0.2 route: each UUID owns one complete character context
+            # (identity + pose + shared scene), and every Body/Ownership Hint
+            # mask for that UUID selects this same branch. Keep the original
+            # 0.2 absolute replacement formula free from the later split-route
+            # residual schedules and background/layout subtraction branches.
+            weights = _v2_weights(self.state, x, base, body_expand=0.0)
+            flags = _expand_cond_flags(
+                options.get("cond_or_uncond", self.state.get("cond_or_uncond")),
+                int(x.shape[0]),
+            )
+            conditional = torch.tensor(
+                flags,
+                device=base.device,
+                dtype=base.dtype,
+            ).view(1, int(x.shape[0]), 1, 1)
+            weights = weights * conditional
+            delta_total = torch.zeros_like(base)
+            global_strength = float(self.state.get("global_strength", 1.0))
+            for index, (character, character_context) in enumerate(
+                zip(self.state["characters"], contexts)
+            ):
+                character_strength = float(character["strength"])
+                if global_strength == 0.0 or character_strength == 0.0:
+                    continue
+                branch = self.inner_forward(
+                    x,
+                    character_context,
+                    rope_emb=rope_emb,
+                    transformer_options=options,
+                )
+                delta = branch - base
+                if self.state["blend_mode"] == "base_preserve":
+                    delta = _project_perpendicular(delta, base)
+                delta_total = (
+                    delta_total
+                    + weights[index]
+                    * global_strength
+                    * character_strength
+                    * delta
+                )
+            return base + delta_total
+
+        if routing_contract == "global_mix_v1":
+            # Bounded complete-output mixing. The actual incoming context is
+            # always the global/base branch (including a Post-Adapter Mixer),
+            # while every regional branch remains identity + pose + shared
+            # scene. Mask coverage is kept outside the normalization so
+            # feathered edges and Soft Hints retain their spatial strength.
+            weights, hint_weights = _v2_weight_components(
+                self.state,
+                x,
+                base,
+                body_expand=0.0,
+            )
+            flags = _expand_cond_flags(
+                options.get("cond_or_uncond", self.state.get("cond_or_uncond")),
+                int(x.shape[0]),
+            )
+            conditional = torch.tensor(
+                flags,
+                device=base.device,
+                dtype=base.dtype,
+            ).view(1, int(x.shape[0]), 1, 1)
+            ownership_weights = weights * conditional
+            hint_weights = hint_weights * conditional
+            # Late detail preservation reduces broad regional coverage so the
+            # actual base can finish texture. Optional Hint hold restores only
+            # the resolved target-character portion inside Ownership Hints.
+            # These non-negative weights remain bounded by one at every token.
+            detail_scale = _detail_preserve_scale(self.state)
+            hint_scale = _hint_constraint_scale(self.state, detail_scale)
+            hint_extra_scale = max(0.0, hint_scale - detail_scale)
+            adaptive_extra_scale = (
+                0.5 * max(0.0, 1.0 - detail_scale)
+                if self.state.get("character_focus_mode", "off") == "adaptive"
+                else 0.0
+            )
+            baseline_weights = (
+                ownership_weights * detail_scale
+                + hint_weights * hint_extra_scale
+            )
+            adaptive_active = adaptive_extra_scale > 0.0
+            coverage = (
+                torch.zeros_like(ownership_weights[0])
+                if adaptive_active
+                else baseline_weights.sum(dim=0).clamp(0.0, 1.0)
+            )
+            regional_mass = torch.zeros_like(coverage)
+            regional_output = torch.zeros_like(base)
+            global_strength = float(self.state.get("global_strength", 1.0))
+            for index, (character, character_context) in enumerate(
+                zip(self.state["characters"], contexts)
+            ):
+                character_strength = max(0.0, float(character["strength"]))
+                branch_strength = global_strength * character_strength
+                if branch_strength == 0.0:
+                    if adaptive_active:
+                        coverage = coverage + baseline_weights[index]
+                    continue
+                branch = self.inner_forward(
+                    x,
+                    character_context,
+                    rope_emb=rope_emb,
+                    transformer_options=options,
+                )
+                branch_weight = baseline_weights[index]
+                if adaptive_active:
+                    focus = _adaptive_character_focus(
+                        self.state,
+                        x,
+                        branch,
+                        base,
+                        ownership_weights[index],
+                    )
+                    focus_extra = (
+                        ownership_weights[index]
+                        * focus
+                        * adaptive_extra_scale
+                    )
+                    hint_extra = hint_weights[index] * hint_extra_scale
+                    branch_weight = torch.minimum(
+                        ownership_weights[index] * detail_scale
+                        + torch.maximum(focus_extra, hint_extra),
+                        ownership_weights[index],
+                    )
+                    coverage = coverage + branch_weight
+                mass = branch_weight * branch_strength
+                regional_mass = regional_mass + mass
+                regional_output = regional_output + mass * branch
+
+            if adaptive_active:
+                coverage = coverage.clamp(0.0, 1.0)
+
+            epsilon = 1e-6
+            active = (coverage > epsilon) & (regional_mass > epsilon)
+            mean_strength = torch.where(
+                active,
+                regional_mass / coverage.clamp_min(epsilon),
+                torch.zeros_like(regional_mass),
+            )
+            global_weight = float(self.state.get("global_mix_weight", 0.25))
+            denominator = global_weight + mean_strength
+            inverse = torch.where(
+                active,
+                denominator.clamp_min(epsilon).reciprocal(),
+                torch.zeros_like(denominator),
+            )
+            regional_alpha = (regional_mass * inverse).clamp(0.0, 1.0)
+            return base * (1.0 - regional_alpha) + regional_output * inverse
+
+        if routing_contract != "separated_v1":
+            raise _error(f"unsupported V2 routing contract: {routing_contract}")
+
         identity_contexts = (
             self._identity_contexts(context)
             if self.state.get("has_identity_conditioning", False)
@@ -561,8 +819,11 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         raise _error(f"unsupported model: {reason}")
     options = dict(advanced_options or {})
     routing_contract = regional_pack.get("routing_contract", "legacy_v2")
-    if routing_contract not in ("legacy_v2", "separated_v1"):
+    if routing_contract not in ("legacy_v2", "global_mix_v1", "separated_v1"):
         raise _error("regional pack has an unsupported routing contract")
+    global_mix_weight = float(regional_pack.get("global_mix_weight", 0.25))
+    if not 0.0 <= global_mix_weight <= 2.0:
+        raise _error("global_mix_weight must be between 0 and 2")
     start_block = max(0, int(options.get("start_block", 0)))
     requested_end = int(options.get("end_block", -1))
     end_block = block_count - 1 if requested_end < 0 else min(block_count - 1, requested_end)
@@ -605,6 +866,12 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     detail_preserve_amount = float(options.get("detail_preserve_amount", 0.5))
     if not 0.0 <= detail_preserve_amount <= 0.95:
         raise _error("detail_preserve_amount must be between 0 and 0.95")
+    hint_constraint_mode = str(options.get("hint_constraint_mode", "off"))
+    if hint_constraint_mode not in HINT_CONSTRAINT_MODES:
+        raise _error("hint_constraint_mode must be off, soft, or strong")
+    character_focus_mode = str(options.get("character_focus_mode", "off"))
+    if character_focus_mode not in CHARACTER_FOCUS_MODES:
+        raise _error("character_focus_mode must be off or adaptive")
     edge_focus_power = float(options.get("edge_focus_power", 1.0))
     if not 1.0 <= edge_focus_power <= 4.0:
         raise _error("edge_focus_power must be between 1 and 4")
@@ -634,6 +901,25 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     identity_core_radius = float(options.get("identity_core_radius", 0.55))
     if not 0.05 <= identity_core_radius <= 1.0:
         raise _error("identity_core_radius must be between 0.05 and 1")
+
+    if routing_contract in ("legacy_v2", "global_mix_v1"):
+        # These split-route controls intentionally do not alter the complete-
+        # branch routes. Common controls such as strength, block/sigma range
+        # and boundary falloff remain active. Global Mix performs its own
+        # bounded absolute blend and therefore ignores blend_mode projection.
+        composition_mode = "off"
+        composition_strength = 1.0
+        composition_expand = 0.0
+        multi_character_guard = "off"
+        if routing_contract == "legacy_v2":
+            detail_preserve_mode = "off"
+        edge_focus_power = 1.0
+        identity_anchor_mode = "off"
+        identity_detail_mode = "off"
+    if routing_contract != "global_mix_v1":
+        hint_constraint_mode = "off"
+        character_focus_mode = "off"
+
     if (
         identity_anchor_mode == "shared_delta"
         and not isinstance(
@@ -700,9 +986,12 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
     ]
     if not characters:
         raise _error("regional pack has no active character branches")
-    has_identity_conditioning = any(
-        isinstance(character.get("identity_conditioning"), dict)
-        for character in characters
+    has_identity_conditioning = (
+        routing_contract == "separated_v1"
+        and any(
+            isinstance(character.get("identity_conditioning"), dict)
+            for character in characters
+        )
     )
     if (
         identity_detail_mode == "late"
@@ -734,10 +1023,13 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "detail_preserve_mode": detail_preserve_mode,
         "detail_preserve_start": detail_preserve_start,
         "detail_preserve_amount": detail_preserve_amount,
+        "hint_constraint_mode": hint_constraint_mode,
+        "character_focus_mode": character_focus_mode,
         "detail_sigma_range": detail_sigma_range,
         "sampling_sigma_range": sampling_sigma_range,
         "edge_focus_power": edge_focus_power,
         "routing_contract": routing_contract,
+        "global_mix_weight": global_mix_weight,
         "identity_anchor_mode": identity_anchor_mode,
         "identity_anchor_strength": identity_anchor_strength,
         "identity_late_floor": identity_late_floor,
@@ -769,6 +1061,7 @@ def apply_v2_regional(model, regional_pack, blend_mode, advanced_options=None):
         "shared_context_cache": {},
         "layout_context_cache": {},
         "mask_cache": {},
+        "hint_mask_cache": {},
         "identity_core_cache": {},
         "disabled_layers": set(),
     }
